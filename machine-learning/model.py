@@ -4,9 +4,10 @@ from torch import nn
 import torch.optim as optim
 import os
 from timefrequencydataset import TimeFrequencyMapDataset
+from tqdm import tqdm
 from torch.utils.data import random_split, DataLoader
 
-def load_modified_pretrained_vgg16(num_classes):
+def load_modified_pretrained_vgg16(num_classes, device):
     class ModifiedVGG16(nn.Module):
         def __init__(self, features, avgpool, classifier):
             super().__init__()
@@ -17,8 +18,7 @@ def load_modified_pretrained_vgg16(num_classes):
         def forward(self, x):
             x = self.features(x)
             x = self.avgpool(x)
-            x = x.view(x.size(0), -1) 
-            x = x.transpose(0, 1)
+            x = torch.flatten(x, 1) 
             x = self.classifier(x)
             return x
 
@@ -34,8 +34,8 @@ def load_modified_pretrained_vgg16(num_classes):
     features = nn.Sequential(new_first_layer, *layers)
 
     # Freeze pretrained layers
-    for param in model.features.parameters():
-        param.requires_grad = False
+    #for param in model.features.parameters():
+    #    param.requires_grad = False
         
     # Add global average pooling
     avgpool = nn.AdaptiveAvgPool2d((1, 1))
@@ -52,49 +52,89 @@ def load_modified_pretrained_vgg16(num_classes):
     )
 
     model = ModifiedVGG16(features, avgpool, classifier)
-    model = model.double()
 
-    return model
+    return model.to(device)
 
-def train_model(model, dataset, epochs):
+def train_model(model, dataset, epochs, device="cpu"):
     # Split into training and test
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size 
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    train_dataloader = DataLoader(train_dataset)
-    test_dataset = DataLoader(test_dataset)
+    train_dataloader = DataLoader(train_dataset, batch_size=6)
+    test_dataloader = DataLoader(test_dataset, batch_size=6)
 
     learning_rate = 0.001
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
 
-    for epoch in range(epochs):
-        model.train()
+    print(f"Training Model on device {device}")
 
-        train_loss = 0
+    # Train Model
+    with tqdm(total=epochs, desc=f"Epoch 1") as pbar:
+        for epoch in range(epochs):
+            model.train()
 
-        for input_maps, labels in train_dataloader:
-            optimizer.zero_grad()
+            train_loss = 0
+            total_samples = 0
 
-            outputs = model(input_maps)
+            for input_maps, labels in train_dataloader:
+                optimizer.zero_grad()
 
-            loss = criterion(outputs, labels)
+                outputs = model(input_maps)
 
-            loss.backward()
+                loss = criterion(outputs, labels)
 
-            optimizer.step()
-            train_loss += loss.item()
+                loss.backward()
 
-        print(f"Epoch: {epoch}, train_loss: {train_loss}")
+                optimizer.step()
+            
+                train_loss += loss.item()
+                total_samples += input_maps.size(0)
+
+            avg_loss = train_loss / total_samples
+
+            pbar.set_postfix(loss=avg_loss)
+            pbar.update(1)
+            pbar.set_description(f"Epoch {epoch+1}")
+
+    # Test model
+    test_loss = 0.0
+    correct = 0
+    total_samples = 0
+
+    for test_map, test_label in test_dataloader:
+        model.eval()
+        test_map, test_label = test_map.to(device), test_label.to(device)
+
+        outputs = model(test_label)
+
+        # Compute loss (if needed)
+        loss = criterion(outputs, labels)
+        test_loss += loss.item() * test_map.size(0)  # Accumulate total loss
+        
+        # Calculate accuracy
+        predictions = outputs.argmax(dim=1)  # For classification
+        correct += (predictions == labels).sum().item()
+        total_samples += test_map.size(0)
+
+
+    # Average metrics
+    avg_loss = test_loss / total_samples
+    accuracy = correct / total_samples
+
+    print(f"Test Loss: {avg_loss:.4f}, Accuracy: {accuracy * 100:.2f}%")
+
+
 
 if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
 
-    model = load_modified_pretrained_vgg16(5)
+    model = load_modified_pretrained_vgg16(5, device)
     
     data_path = os.path.join("..", "data")
 
-    dataset = TimeFrequencyMapDataset(data_path)
+    dataset = TimeFrequencyMapDataset(data_path, device)
 
     train_model(model, dataset, 25)
 
