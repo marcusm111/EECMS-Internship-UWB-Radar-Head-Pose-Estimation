@@ -29,13 +29,13 @@ def load_modified_pretrained_vgg16(num_classes, device):
     new_first_layer = nn.Conv2d(1, 64, kernel_size=3, padding=1)
     new_first_layer.weight.data = original_weight.mean(dim=1, keepdim=True)
 
-    # Remove final maxpooling and onwards
+    # Remove final maxpooling and onwards and very first layer
     layers = list(model.features.children())[1:-1]
     features = nn.Sequential(new_first_layer, *layers)
 
     # Freeze pretrained layers
-    #for param in model.features.parameters():
-    #    param.requires_grad = False
+    for param in model.features.parameters():
+       param.requires_grad = False
         
     # Add global average pooling
     avgpool = nn.AdaptiveAvgPool2d((1, 1))
@@ -103,20 +103,20 @@ def train_model(model, dataset, epochs, device="cpu"):
     correct = 0
     total_samples = 0
 
-    for test_map, test_label in test_dataloader:
+    for test_maps, test_labels in test_dataloader:
         model.eval()
-        test_map, test_label = test_map.to(device), test_label.to(device)
+        test_maps, test_labels = test_maps.to(device), test_labels.to(device)
 
-        outputs = model(test_label)
+        outputs = model(test_maps)
 
         # Compute loss (if needed)
-        loss = criterion(outputs, labels)
-        test_loss += loss.item() * test_map.size(0)  # Accumulate total loss
+        loss = criterion(outputs, test_labels)
+        test_loss += loss.item() * test_maps.size(0)  # Accumulate total loss
         
         # Calculate accuracy
         predictions = outputs.argmax(dim=1)  # For classification
-        correct += (predictions == labels).sum().item()
-        total_samples += test_map.size(0)
+        correct += (predictions == test_labels).sum().item()
+        total_samples += test_maps.size(0)
 
 
     # Average metrics
