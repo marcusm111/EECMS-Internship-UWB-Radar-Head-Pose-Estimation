@@ -1,6 +1,4 @@
 import os
-import torch
-from timefrequencydataset import TimeFrequencyMapDataset
 import shutil
 import math
 
@@ -18,10 +16,10 @@ def build_dataset(data_path):
                 if "Down" in file:
                     shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Down", file))
                 elif "No Movement" in file:
-                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "No Movement", file))
-                elif "Right90" in file:
-                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Right90", file))
-                elif "Left90" in file:
+                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "No _Movement", file))
+                elif "Right" in file:
+                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Right", file))
+                elif "Left" in file:
                     shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Left", file))
                 elif "Up" in file:
                     shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Up", file))

@@ -11,9 +11,17 @@ from torch.utils.data import DataLoader
 import wandb
 import platform
 import torch.nn.functional as F 
+from visualisations import visualize_feature_space
 """
 model.py: 
 """
+class ClassTokenSelector(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return x[:, 0]
+
+
 class DirectionLoss(nn.Module):
     def __init__(self, class_weights, opposite_pairs, margin=0.5, pair_weight=0.3):
         """
@@ -57,22 +65,51 @@ class DirectionLoss(nn.Module):
         return total_loss
 
 class ViTFeatures(nn.Module):
-    def __init__(self, vit_model):
+    def __init__(self, vit_model, dropout=0.1):
         super().__init__()
-        self.conv_proj = vit_model.conv_proj
+        # 1. Custom 1-channel projection (input is 224x224)
         self.class_token = vit_model.class_token
+        original_conv = vit_model.conv_proj
+        self.conv_proj = nn.Conv2d(
+            1,  # Single channel input
+            original_conv.out_channels,
+            kernel_size=original_conv.kernel_size,
+            stride=original_conv.stride,
+            padding=original_conv.padding,
+            bias=False
+        )
+        
+        # 2. Optimal initialization for radar data
+        if vit_model.state_dict():  # Using pretrained weights
+            # Hybrid initialization
+            with torch.no_grad():
+                # Average RGB weights to 1-channel
+                radar_weights = original_conv.weight.mean(dim=1, keepdim=True)
+                # Match variance of pretrained weights
+                std_ratio = original_conv.weight.std() / radar_weights.std()
+                self.conv_proj.weight.copy_(radar_weights * std_ratio)
+        else:  # Training from scratch
+            nn.init.kaiming_normal_(self.conv_proj.weight,
+                                  mode='fan_out',
+                                  nonlinearity='relu')
+
+        # 3. Positional embedding with dropout (no resizing needed)
+        self.pos_dropout = nn.Dropout(p=dropout)
         self.encoder = vit_model.encoder
-        self.pos_embedding = vit_model.encoder.pos_embedding   # Corrected line
-        self.patch_size = vit_model.conv_proj.kernel_size
+        self.pos_embedding = vit_model.encoder.pos_embedding  # Already 224x224 compatible
 
     def forward(self, x):
-        x = self.conv_proj(x)
-        x = x.flatten(2).transpose(1, 2)
+        # Input: [B, 1, 224, 224]
+        x = self.conv_proj(x)  # [B, 768, 14, 14] 
+        x = x.flatten(2).transpose(1, 2)  # [B, 196, 768]
+        
+        # Add class token and position embedding
         class_token = self.class_token.expand(x.shape[0], -1, -1)
         x = torch.cat([class_token, x], dim=1)
         x = x + self.pos_embedding
-        x = self.encoder(x)
-        return x[:, 0]
+        x = self.pos_dropout(x)
+        
+        return self.encoder(x)
 
 class HeadRadarModel(nn.Module):
         def __init__(self, features, avgpool, classifier):
@@ -84,13 +121,20 @@ class HeadRadarModel(nn.Module):
         def forward(self, x):
             # Image classification backbone
             x = self.features(x)
-            # Anverage pool for classifier
+            # Average pool for classifier
             x = self.avgpool(x)
             # Flatten for MLP
             x = torch.flatten(x, 1)
             # Run through classifier
             x = self.classifier(x)
             return x
+        
+        def get_embeddings(self, x):
+            """Extracts feature embeddings before classification"""
+            with torch.no_grad():
+                x = self.features(x)
+                x = self.avgpool(x)
+                return torch.flatten(x, 1)
 
 def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dims=[256, 128], 
                         use_dropout=False, dropout_rate=0.3, use_batchnorm=False, num_unfrozen_layers=0):
@@ -149,8 +193,8 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
         
         model.conv_proj = new_conv_proj
         features = ViTFeatures(model)
-        avgpool = nn.Identity()  # ViT already outputs class token
-        in_features = 768  # Hidden dimension for ViT-B/16
+        avgpool = ClassTokenSelector()  # Changed from nn.Identity()
+        in_features = 768
         
         # Freeze/unfreeze layers
         if use_pretrained:
@@ -160,7 +204,6 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
             
             # Unfreeze specified number of transformer blocks
             if num_unfrozen_layers > 0:
-                # CORRECTED LINES BELOW
                 total_layers = len(features.encoder.layers)
                 start_layer = total_layers - num_unfrozen_layers
                 for i in range(start_layer, total_layers):
@@ -187,6 +230,13 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
 
     return HeadRadarModel(features, avgpool, classifier)
 
+def get_class_names_from_subset(dataset):
+    """Traverses through NormalizedDataset -> Subset -> original dataset"""
+    if hasattr(dataset, 'subset'):
+        if hasattr(dataset.subset, 'dataset') and hasattr(dataset.subset.dataset, 'classes'):
+            return dataset.subset.dataset.classes
+    return None
+
 def objective(trial, train_dataset, val_dataset, device, class_weights, opposite_pairs):
     """ 
     Objective function for optuna. Bayesian optimisation
@@ -194,6 +244,8 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
     """Objective function with W&B logging"""
     if platform.system() == "Windows":
         os.environ["WANDB_SYMLINK"] = "false"
+
+    class_names = get_class_names_from_subset(val_dataset)
 
     # Initialize W&B run for this trial
     run = wandb.init(
@@ -295,6 +347,7 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 train_loss += loss.item()
 
@@ -340,6 +393,15 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
         if best_weights:
             model.load_state_dict(best_weights)
 
+            val_loader = DataLoader(val_dataset, batch_size=params['batch_size'])
+            visualize_feature_space(
+                model=model,
+                dataloader=val_loader,
+                device=device,
+                class_names=class_names
+            )
+            
+
         run.finish()
         return best_val_acc
     
@@ -347,3 +409,4 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
     except Exception as e:
         run.finish()
         raise e
+    

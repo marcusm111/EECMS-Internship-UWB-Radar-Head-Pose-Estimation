@@ -6,15 +6,15 @@ from sklearn.metrics import confusion_matrix
 import numpy as np
 from timefrequencydataset import TimeFrequencyMapDataset
 from tqdm import tqdm
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Dataset, Subset
 import torch
 import optuna
 from model import objective, load_modified_model, DirectionLoss
-from torch import nn 
 import torch.optim as optim
 import wandb
 from sklearn.model_selection import StratifiedShuffleSplit
 import platform
+from visualisations import visualize_feature_space
 
 
 def main():
@@ -27,35 +27,80 @@ def main():
     # Initialize W&B project
     wandb.init(project="radar-head-movement", name="main-experiment")
 
-    # Dataset and splits
-    dataset = TimeFrequencyMapDataset(os.path.join("clean_data"))
-    print("Actual class order:", dataset.classes)
-    targets = [dataset[i][1].item() for i in range(len(dataset))]
+   # Dataset and splits
+    raw_dataset = TimeFrequencyMapDataset(os.path.join("clean_data"), compute_stats=False)
+    targets = [raw_dataset[i][1].item() for i in range(len(raw_dataset))]
+    print("Actual class order:", raw_dataset.classes)
 
-    # Stratified split
+    # --- Critical Fix: Proper Stratified Splitting ---
+    # First split: Train+Val vs Test
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_val_idx, test_idx = next(sss.split(np.zeros(len(dataset)), targets))
-    train_val = torch.utils.data.Subset(dataset, train_val_idx)
-    test = torch.utils.data.Subset(dataset, test_idx)
-
+    train_val_indices, test_indices = next(sss.split(np.zeros(len(raw_dataset)), targets))
+    
+    # Second split: Train vs Val (relative to train_val_indices)
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_idx, val_idx = next(sss.split(np.zeros(len(train_val)), [targets[i] for i in train_val_idx]))
-    train = torch.utils.data.Subset(train_val, train_idx)
-    val = torch.utils.data.Subset(train_val, val_idx)
+    train_rel_indices, val_rel_indices = next(sss.split(
+        np.zeros(len(train_val_indices)), 
+        [targets[i] for i in train_val_indices]
+    ))
+    
+    # Map to original dataset indices
+    train_abs_indices = train_val_indices[train_rel_indices]
+    val_abs_indices = train_val_indices[val_rel_indices]
 
-    # Compute class weights with Laplace smoothing
-    labels = [train[i][1].item() for i in range(len(train))]
-    class_counts = torch.bincount(torch.tensor(labels), minlength=5) + 1  # Add 1 for smoothing
-    class_weights = (1.0 / class_counts.float()).to(device)
+    # Create subsets
+    train_subset = Subset(raw_dataset, train_abs_indices)
+    val_subset = Subset(raw_dataset, val_abs_indices)
+    test_subset = Subset(raw_dataset, test_indices)
+
+    # --- Fix: Compute class weights BEFORE normalization ---
+    labels = [train_subset[i][1].item() for i in range(len(train_subset))]  # Use subset directly
+    class_counts = torch.bincount(torch.tensor(labels), minlength=5) + 1
+    class_weights = (1.0 / class_counts.float())
     class_weights = (class_weights / class_weights.sum()).to(device)
 
-    opposite_pairs = [(1, 3), (0, 4)]
+    def calculate_stats(subset):
+        tensors = torch.cat([subset[i][0] for i in range(len(subset))])
+        mean = tensors.mean().item()
+        std = tensors.std().item()
+        return torch.tensor(mean), torch.tensor(std)
+
+    train_mean, train_std = calculate_stats(train_subset)
+
+    class NormalizedDataset(Dataset):
+        def __init__(self, subset, mean, std):
+            self.subset = subset
+            self.mean = mean
+            self.std = std
+
+        def __len__(self):
+            return len(self.subset)
+
+        def __getitem__(self, idx):
+            x, y = self.subset[idx]
+            return (x - self.mean) / self.std, y
+
+    train = NormalizedDataset(train_subset, train_mean, train_std)
+    val = NormalizedDataset(val_subset, train_mean, train_std)
+    test = NormalizedDataset(test_subset, train_mean, train_std)
+
+
+    class_to_idx = {name: i for i, name in enumerate(raw_dataset.classes)}
+    opposite_pairs = [
+        (class_to_idx["Left"], class_to_idx["Right"]),
+        (class_to_idx["Down"], class_to_idx["Up"])
+    ]
+    print("\nClass Verification:")
+    print(f"{'Class Name':<15} | {'Index':<5} | {'Opposite Pair'}")
+    for name, idx in class_to_idx.items():
+        opposites = [pair for pair in opposite_pairs if idx in pair]
+        print(f"{name:<15} | {idx:<5} | {opposites}")
 
     criterion = DirectionLoss(
-    class_weights=class_weights.to(device),
-    opposite_pairs=opposite_pairs,
-    margin=0.5,    # Minimum logit difference between opposites
-    pair_weight=0.3 # Weight for the pair penalty term
+        class_weights=class_weights.to(device),
+        opposite_pairs=opposite_pairs,
+        margin=0.5,
+        pair_weight=0.3
     ).to(device)
 
     # Optuna study with W&B callback
@@ -83,13 +128,13 @@ def main():
     # Final model training
     best_params = trial.params
     model_params = {
-        'model_type': best_params['model_type'],
-        'use_pretrained': best_params['use_pretrained'],
-        'hidden_dims': [best_params[f'layer_{i}_dim'] 
-                       for i in range(best_params['num_layers'])],
-        'use_dropout': best_params.get('use_dropout', False),
-        'dropout_rate': best_params.get('dropout_rate', 0.0),
-        'use_batchnorm': best_params.get('use_batchnorm', False)
+    'model_type': best_params['model_type'],
+    'use_pretrained': best_params['use_pretrained'],
+    'hidden_dims': [best_params[f'layer_{i}_dim'] for i in range(best_params['num_layers'])],
+    'use_dropout': best_params.get('use_dropout', False),
+    'dropout_rate': best_params.get('dropout_rate', 0.0),
+    'use_batchnorm': best_params.get('use_batchnorm', False),
+    'num_unfrozen_layers': best_params.get('resnet_unfrozen_layers', best_params.get('vit_unfrozen_layers', 0))
     }
     
     model = load_modified_model(num_classes=5, **model_params).to(device)
@@ -99,10 +144,29 @@ def main():
                             shuffle=True)
     test_loader = DataLoader(test, 
                            batch_size=best_params['batch_size'])
+    val_loader = DataLoader(val, batch_size=best_params['batch_size'])
 
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), 
-                         lr=best_params['lr'])
-    criterion = DirectionLoss()
+    optimizer_config = {
+        'params': filter(lambda p: p.requires_grad, model.parameters()),
+        'lr': best_params['lr'],
+        'weight_decay': best_params['weight_decay']
+    }
+    if best_params['optimizer'] == 'sgd':
+        optimizer_config['momentum'] = best_params['momentum']
+        optimizer = optim.SGD(**optimizer_config)
+    else:
+        optimizer = optim.Adam(**optimizer_config)
+
+    criterion = DirectionLoss(
+        class_weights=class_weights.to(device),
+        opposite_pairs=opposite_pairs,
+        margin=0.5,
+        pair_weight=0.3
+    ).to(device)
+
+    best_acc = 0
+    patience = best_params['patience']
+    no_improve = 0
 
     # Final training loop
     for epoch in tqdm(range(100), desc="Final Training"):
@@ -114,9 +178,33 @@ def main():
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             epoch_loss += loss.item()  # Accumulate loss
         wandb.log({"final_train_loss": epoch_loss/len(train_loader)})
+
+        # Validation check
+        model.eval()
+        val_correct = 0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                val_correct += (outputs.argmax(1) == labels).sum().item()
+        val_acc = val_correct/len(val)
+
+        wandb.log({
+            "final_train_loss": epoch_loss/len(train_loader),
+            "val_acc": val_acc
+        })
+                
+        if val_acc > best_acc + 0.001:
+            best_acc = val_acc
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                break
 
     model.eval()
     all_preds = []
@@ -145,7 +233,7 @@ def main():
 
     # Generate confusion matrix
     cm = confusion_matrix(all_labels, all_preds)
-    class_names = dataset.classes  # Get original class names
+    class_names = raw_dataset.classes  # Get original class names
     
     print("\nConfusion Matrix:")
     print(cm)
@@ -171,6 +259,13 @@ def main():
     final_model_path = "final_head_movement_model.pth"
     torch.save(model.state_dict(), final_model_path)
     wandb.save(final_model_path)
+
+    visualize_feature_space(
+        model=model,
+        dataloader=test_loader,
+        device=device,
+        class_names=class_names 
+    )
 
     # Then update the existing wandb.log() to:
     wandb.log({
