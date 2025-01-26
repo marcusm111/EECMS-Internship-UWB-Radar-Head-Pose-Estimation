@@ -1,0 +1,5 @@
+__pycache__
+machine-learning/best_model.pth
+machine-learning/data/
+machine-learning/raw_data/
+machine-learning/wandb/
