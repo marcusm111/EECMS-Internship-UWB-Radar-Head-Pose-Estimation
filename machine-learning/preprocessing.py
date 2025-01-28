@@ -5,8 +5,8 @@ import math
 def build_dataset(data_path):
     os.makedirs("data", exist_ok=True)
     os.makedirs(os.path.join("data", "Down"), exist_ok=True)
-    os.makedirs(os.path.join("data", "No Movement"), exist_ok=True)
-    os.makedirs(os.path.join("data", "Right90"), exist_ok=True)
+    os.makedirs(os.path.join("data", "No_Movement"), exist_ok=True)
+    os.makedirs(os.path.join("data", "Right"), exist_ok=True)
     os.makedirs(os.path.join("data", "Left"), exist_ok=True)
     os.makedirs(os.path.join("data", "Up"), exist_ok=True)
     for sub_directory in [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]:
@@ -16,7 +16,7 @@ def build_dataset(data_path):
                 if "Down" in file:
                     shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Down", file))
                 elif "No Movement" in file:
-                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "No _Movement", file))
+                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "No_Movement", file))
                 elif "Right" in file:
                     shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Right", file))
                 elif "Left" in file:
@@ -167,6 +167,8 @@ def clean_infinities_and_save(input_dir, output_dir, delimiter=","):
     print(f"Total NaNs replaced: {total_nan}")
     print(f"Total invalid entries replaced: {total_invalid}")
     print(f"\nCleaned files saved to: {output_dir}")
+
+build_dataset("raw_data")
 
 # Usage example:
 main_directory = "data"

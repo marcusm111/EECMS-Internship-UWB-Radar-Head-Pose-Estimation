@@ -49,16 +49,21 @@ class DirectionLoss(nn.Module):
         """
         # 1. Class-weighted cross-entropy
         ce_loss = self.ce_loss(outputs, targets)
+        pair_loss = 0
         
         # 2. Opposite direction penalty
-        pair_loss = 0.0
         for i, j in self.opposite_pairs:
-            # For each sample, ensure correct class logit > opposite class + margin
-            diff = outputs[:, i] - outputs[:, j]
-            
-            # Only penalize when correct class isn't sufficiently higher
+            mask = (targets == i) | (targets == j)
+            if mask.sum() == 0:
+                continue
+            selected_outputs = outputs[mask]
+            selected_targets = targets[mask]
+            # For targets i: ensure output[i] > output[j] + margin
+            # For targets j: ensure output[j] > output[i] + margin
+            diff = selected_outputs[:, i] - selected_outputs[:, j]
+            diff = torch.where(selected_targets == i, diff, -diff)
             pair_loss += F.relu(self.margin - diff).mean()
-            
+                    
         # Combine losses
         total_loss = ce_loss + self.pair_weight * pair_loss
         
@@ -277,8 +282,8 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
             'use_pretrained': use_pretrained,
             'num_unfrozen_layers': num_unfrozen_layers,
             'lr': trial.suggest_float('lr', 1e-6, 1e-3, log=True),
-            'batch_size': trial.suggest_categorical('batch_size', [16, 32]),
-            'num_layers': trial.suggest_int('num_layers', 1, 6),
+            'batch_size': trial.suggest_categorical('batch_size', [4, 8, 16]),
+            'num_layers': trial.suggest_int('num_layers', 1, 3),
             'use_dropout': trial.suggest_categorical('use_dropout', [True, False]),
             'use_batchnorm': trial.suggest_categorical('use_batchnorm', [True, False]),
             'patience': trial.suggest_int('patience', 10, 30),
@@ -291,14 +296,14 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
             params['noise_std'] = trial.suggest_float('noise_std', 0.0, 0.3)
         if params['optimizer'] == 'sgd':
             params['momentum'] = trial.suggest_float('momentum', 0.8, 0.99)
-        params['hidden_dims'] = [trial.suggest_categorical(f'layer_{i}_dim', [64, 128, 256, 512, 1024]) for i in range(params['num_layers'])]
+        params['hidden_dims'] = [trial.suggest_categorical(f'layer_{i}_dim', [64, 128, 256, 512]) for i in range(params['num_layers'])]
         params['dropout_rate'] = trial.suggest_float('dropout_rate', 0.1, 0.5) if params['use_dropout'] else 0.0
 
         wandb.config.update(params)
 
         # Data loaders
-        train_loader = DataLoader(train_dataset, batch_size=params['batch_size'], shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=params['batch_size'])
+        train_loader = DataLoader(train_dataset, batch_size=params['batch_size'], shuffle=True, pin_memory=(device.type == 'cuda'))
+        val_loader = DataLoader(val_dataset, batch_size=params['batch_size'], pin_memory=(device.type == 'cuda'))
 
         # Model
         model_params = {
@@ -393,7 +398,7 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
         if best_weights:
             model.load_state_dict(best_weights)
 
-            val_loader = DataLoader(val_dataset, batch_size=params['batch_size'])
+            val_loader = DataLoader(val_dataset, batch_size=params['batch_size'], pin_memory=(device.type == 'cuda'))
             visualize_feature_space(
                 model=model,
                 dataloader=val_loader,

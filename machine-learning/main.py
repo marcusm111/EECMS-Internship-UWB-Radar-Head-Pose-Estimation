@@ -15,7 +15,8 @@ import wandb
 from sklearn.model_selection import StratifiedShuffleSplit
 import platform
 from visualisations import visualize_feature_space
-
+torch.manual_seed(42)
+np.random.seed(42)
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,9 +24,6 @@ def main():
 
     if platform.system() == "Windows":
         os.environ["WANDB_SYMLINK"] = "false"
-
-    # Initialize W&B project
-    wandb.init(project="radar-head-movement", name="main-experiment")
 
    # Dataset and splits
     raw_dataset = TimeFrequencyMapDataset(os.path.join("clean_data"), compute_stats=False)
@@ -108,14 +106,20 @@ def main():
         direction='maximize',
         sampler=optuna.samplers.TPESampler(
         multivariate=True,
-        group=True  # ← Better for conditional parameters
+        group=True,  # ← Better for conditional parameters
+        n_startup_trials=50  
         ),
-        pruner=optuna.pruners.HyperbandPruner(min_resource=1, max_resource=200, reduction_factor=3)
+        pruner=None
+        #pruner=optuna.pruners.HyperbandPruner(min_resource=30, 
+        #                                      max_resource=50, 
+        #                                      reduction_factor=2)
     )
     study.optimize(
         lambda trial: objective(trial, train, val, device, class_weights, opposite_pairs),
-        n_trials=100
+        n_trials=150
     )
+
+    wandb.init(project="radar-head-movement", name="final-model")
 
     # Best trial results
     print("\nBest trial:")
@@ -141,10 +145,13 @@ def main():
     full_train = ConcatDataset([train, val])
     train_loader = DataLoader(full_train, 
                             batch_size=best_params['batch_size'], 
-                            shuffle=True)
+                            shuffle=True,
+                            pin_memory=(device.type == 'cuda'))
     test_loader = DataLoader(test, 
-                           batch_size=best_params['batch_size'])
-    val_loader = DataLoader(val, batch_size=best_params['batch_size'])
+                           batch_size=best_params['batch_size'],
+                           pin_memory=(device.type == 'cuda'))
+    val_loader = DataLoader(val, batch_size=best_params['batch_size'],
+                            pin_memory=(device.type == 'cuda'))
 
     optimizer_config = {
         'params': filter(lambda p: p.requires_grad, model.parameters()),
