@@ -19,7 +19,7 @@ def torch_genfromtxt(file_path, delimiter=",", dtype=torch.float32):
     return tensor
 
 class TimeFrequencyMapDataset(Dataset):
-    def __init__(self, map_dataset_dir, compute_stats=True):  # Added compute_stats flag
+    def __init__(self, map_dataset_dir, compute_stats=True):
         self.map_dataset_dir = map_dataset_dir
         self.classes = sorted(os.listdir(map_dataset_dir))
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}

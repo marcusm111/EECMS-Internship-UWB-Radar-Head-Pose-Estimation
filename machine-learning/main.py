@@ -6,94 +6,32 @@ from sklearn.metrics import confusion_matrix
 import numpy as np
 from timefrequencydataset import TimeFrequencyMapDataset
 from tqdm import tqdm
-from torch.utils.data import DataLoader, ConcatDataset, Dataset, Subset
+from torch.utils.data import DataLoader, ConcatDataset
 import torch
-import optuna
-from model import objective, load_modified_model, DirectionLoss
+from model import load_modified_model, DirectionLoss, bayesian_optimisation
+from utils import create_normalised_subsets, load_config
 import torch.optim as optim
 import wandb
-from sklearn.model_selection import StratifiedShuffleSplit
 import platform
 from visualisations import visualize_feature_space
 torch.manual_seed(42)
 np.random.seed(42)
 
 def main():
+    # Initialise 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-
     if platform.system() == "Windows":
         os.environ["WANDB_SYMLINK"] = "false"
+    config = load_config("config.yaml")
 
-   # Dataset and splits
-    raw_dataset = TimeFrequencyMapDataset(os.path.join("clean_data"), compute_stats=False)
-    targets = [raw_dataset[i][1].item() for i in range(len(raw_dataset))]
-    print("Actual class order:", raw_dataset.classes)
+   # Load raw timefrequencymap dataset
+    raw_dataset = TimeFrequencyMapDataset(config["clean_data"], compute_stats=False)
 
-    # --- Critical Fix: Proper Stratified Splitting ---
-    # First split: Train+Val vs Test
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_val_indices, test_indices = next(sss.split(np.zeros(len(raw_dataset)), targets))
-    
-    # Second split: Train vs Val (relative to train_val_indices)
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_rel_indices, val_rel_indices = next(sss.split(
-        np.zeros(len(train_val_indices)), 
-        [targets[i] for i in train_val_indices]
-    ))
-    
-    # Map to original dataset indices
-    train_abs_indices = train_val_indices[train_rel_indices]
-    val_abs_indices = train_val_indices[val_rel_indices]
+    # Split for training
+    train, val, test, class_weights, opposite_pairs = create_normalised_subsets(raw_dataset, device)
 
-    # Create subsets
-    train_subset = Subset(raw_dataset, train_abs_indices)
-    val_subset = Subset(raw_dataset, val_abs_indices)
-    test_subset = Subset(raw_dataset, test_indices)
-
-    # --- Fix: Compute class weights BEFORE normalization ---
-    labels = [train_subset[i][1].item() for i in range(len(train_subset))]  # Use subset directly
-    class_counts = torch.bincount(torch.tensor(labels), minlength=5) + 1
-    class_weights = (1.0 / class_counts.float())
-    class_weights = (class_weights / class_weights.sum()).to(device)
-
-    def calculate_stats(subset):
-        tensors = torch.cat([subset[i][0] for i in range(len(subset))])
-        mean = tensors.mean().item()
-        std = tensors.std().item()
-        return torch.tensor(mean), torch.tensor(std)
-
-    train_mean, train_std = calculate_stats(train_subset)
-
-    class NormalizedDataset(Dataset):
-        def __init__(self, subset, mean, std):
-            self.subset = subset
-            self.mean = mean
-            self.std = std
-
-        def __len__(self):
-            return len(self.subset)
-
-        def __getitem__(self, idx):
-            x, y = self.subset[idx]
-            return (x - self.mean) / self.std, y
-
-    train = NormalizedDataset(train_subset, train_mean, train_std)
-    val = NormalizedDataset(val_subset, train_mean, train_std)
-    test = NormalizedDataset(test_subset, train_mean, train_std)
-
-
-    class_to_idx = {name: i for i, name in enumerate(raw_dataset.classes)}
-    opposite_pairs = [
-        (class_to_idx["Left"], class_to_idx["Right"]),
-        (class_to_idx["Down"], class_to_idx["Up"])
-    ]
-    print("\nClass Verification:")
-    print(f"{'Class Name':<15} | {'Index':<5} | {'Opposite Pair'}")
-    for name, idx in class_to_idx.items():
-        opposites = [pair for pair in opposite_pairs if idx in pair]
-        print(f"{name:<15} | {idx:<5} | {opposites}")
-
+    # Custom loss function to help differentiate between opposite pairs, left and right, up and down
     criterion = DirectionLoss(
         class_weights=class_weights.to(device),
         opposite_pairs=opposite_pairs,
@@ -101,65 +39,46 @@ def main():
         pair_weight=0.3
     ).to(device)
 
-    # Optuna study with W&B callback
-    study = optuna.create_study(
-        direction='maximize',
-        sampler=optuna.samplers.TPESampler(
-        multivariate=True,
-        group=True,  # ← Better for conditional parameters
-        n_startup_trials=50  
-        ),
-        pruner=None
-        #pruner=optuna.pruners.HyperbandPruner(min_resource=30, 
-        #                                      max_resource=50, 
-        #                                      reduction_factor=2)
-    )
-    study.optimize(
-        lambda trial: objective(trial, train, val, device, class_weights, opposite_pairs),
-        n_trials=150
-    )
-
-    wandb.init(project="radar-head-movement", name="final-model")
-
-    # Best trial results
-    print("\nBest trial:")
-    trial = study.best_trial
-    print(f"Validation accuracy: {trial.value:.4f}")
-    print("Parameters:")
-    for key, value in trial.params.items():
-        print(f"  {key}: {value}")
-
-    # Final model training
-    best_params = trial.params
-    model_params = {
-    'model_type': best_params['model_type'],
-    'use_pretrained': best_params['use_pretrained'],
-    'hidden_dims': [best_params[f'layer_{i}_dim'] for i in range(best_params['num_layers'])],
-    'use_dropout': best_params.get('use_dropout', False),
-    'dropout_rate': best_params.get('dropout_rate', 0.0),
-    'use_batchnorm': best_params.get('use_batchnorm', False),
-    'num_unfrozen_layers': best_params.get('resnet_unfrozen_layers', best_params.get('vit_unfrozen_layers', 0))
+    # Get model parameters
+    if config["bayesian_optimisation"]:
+        # Find and use best params
+        print("Using bayesian optimisation")
+        params = bayesian_optimisation(train, val, device, class_weights, opposite_pairs)
+        model_params = {
+        'model_type': params['model_type'],
+        'use_pretrained': params['use_pretrained'],
+        'hidden_dims': [params[f'layer_{i}_dim'] for i in range(params['num_layers'])],
+        'use_dropout': params.get('use_dropout', False),
+        'dropout_rate': params.get('dropout_rate', 0.0),
+        'use_batchnorm': params.get('use_batchnorm', False),
+        'num_unfrozen_layers': params.get('resnet_unfrozen_layers', params.get('vit_unfrozen_layers', 0))
     }
-    
+    else:
+        # Use default params
+        print("Using default values")
+        params = config["default_params"]
+        model_params = params["model_params"]
+
+    # Load model type
     model = load_modified_model(num_classes=5, **model_params).to(device)
     full_train = ConcatDataset([train, val])
     train_loader = DataLoader(full_train, 
-                            batch_size=best_params['batch_size'], 
+                            batch_size=params['batch_size'], 
                             shuffle=True,
                             pin_memory=(device.type == 'cuda'))
     test_loader = DataLoader(test, 
-                           batch_size=best_params['batch_size'],
+                           batch_size=params['batch_size'],
                            pin_memory=(device.type == 'cuda'))
-    val_loader = DataLoader(val, batch_size=best_params['batch_size'],
+    val_loader = DataLoader(val, batch_size=params['batch_size'],
                             pin_memory=(device.type == 'cuda'))
 
     optimizer_config = {
         'params': filter(lambda p: p.requires_grad, model.parameters()),
-        'lr': best_params['lr'],
-        'weight_decay': best_params['weight_decay']
+        'lr': params['lr'],
+        'weight_decay': params['weight_decay']
     }
-    if best_params['optimizer'] == 'sgd':
-        optimizer_config['momentum'] = best_params['momentum']
+    if params['optimizer'] == 'sgd':
+        optimizer_config['momentum'] = params['momentum']
         optimizer = optim.SGD(**optimizer_config)
     else:
         optimizer = optim.Adam(**optimizer_config)
@@ -172,8 +91,10 @@ def main():
     ).to(device)
 
     best_acc = 0
-    patience = best_params['patience']
+    patience = params['patience']
     no_improve = 0
+    
+    wandb.init(project="radar-head-movement", name="final-model")
 
     # Final training loop
     for epoch in tqdm(range(100), desc="Final Training"):

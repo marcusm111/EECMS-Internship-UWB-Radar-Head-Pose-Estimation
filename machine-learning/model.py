@@ -15,12 +15,12 @@ from visualisations import visualize_feature_space
 """
 model.py: 
 """
+
 class ClassTokenSelector(nn.Module):
     def __init__(self):
         super().__init__()
     def forward(self, x):
         return x[:, 0]
-
 
 class DirectionLoss(nn.Module):
     def __init__(self, class_weights, opposite_pairs, margin=0.5, pair_weight=0.3):
@@ -414,4 +414,37 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
     except Exception as e:
         run.finish()
         raise e
-    
+
+def bayesian_optimisation(train, val, device, class_weights, opposite_pairs):
+    # Optuna study with W&B callback
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=optuna.samplers.TPESampler(
+        multivariate=True,
+        group=True,  # ← Better for conditional parameters
+        n_startup_trials=50  
+        ),
+        pruner=None
+        #pruner=optuna.pruners.HyperbandPruner(min_resource=30, 
+        #                                      max_resource=50, 
+        #                                      reduction_factor=2)
+    )
+    study.optimize(
+        lambda trial: objective(trial, train, val, device, class_weights, opposite_pairs),
+        n_trials=150
+    )
+
+    wandb.init(project="radar-head-movement", name="final-model")
+
+    # Best trial results
+    print("\nBest trial:")
+    trial = study.best_trial
+    print(f"Validation accuracy: {trial.value:.4f}")
+    print("Parameters:")
+    for key, value in trial.params.items():
+        print(f"  {key}: {value}")
+
+    # Final model training
+    best_params = trial.params
+
+    return best_params
