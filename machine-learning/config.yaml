@@ -1,11 +1,11 @@
-
+# Data config
 data: "data"
-raw_data: "data/training_data/raw_data"
-clean_data: "data/training_data/clean_data"
+rebuild_tensors: True # We save and combine .txt files into tensors for easier training
+num_classes: 7
 
 # Toggle activities
 train_model: True
-bayesian_optimisation: False
+bayesian_optimisation: True
 
 # Default model parameters
 default_params:
