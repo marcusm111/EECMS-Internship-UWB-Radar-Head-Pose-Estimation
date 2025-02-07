@@ -2,22 +2,6 @@ from torch.utils.data import Dataset
 import os
 import torch
 
-def torch_genfromtxt(file_path, delimiter=",", dtype=torch.float32):
-    """
-    Load a matrix from a text file into a PyTorch tensor.
-    Mimics basic functionality of `np.genfromtxt`.
-    """
-    data = []
-    with open(file_path, "r") as f:
-        for line in f:
-            # Split line into elements and convert to floats
-            elements = line.strip().split(delimiter)
-            row = [float(e) for e in elements if e]  # Skip empty strings
-            data.append(row)
-    # Convert to tensor and handle ragged rows (if necessary)
-    tensor = torch.tensor(data, dtype=dtype)
-    return tensor
-
 class TimeFrequencyMapDataset(Dataset):
     def __init__(self, map_dataset_dir, compute_stats=True):
         self.map_dataset_dir = map_dataset_dir
@@ -39,8 +23,7 @@ class TimeFrequencyMapDataset(Dataset):
             class_idx = self.class_to_idx[class_name]
             for map_file in os.listdir(class_dir):
                 file_path = os.path.join(class_dir, map_file)
-                tensor = torch_genfromtxt(file_path, delimiter=",")
-                tensor = tensor.unsqueeze(0)  # Add channel dimension
+                tensor = torch.load(file_path)
                 samples.append((tensor, class_idx))
         return samples
 

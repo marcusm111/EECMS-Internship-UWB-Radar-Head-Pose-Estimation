@@ -12,9 +12,6 @@ import wandb
 import platform
 import torch.nn.functional as F 
 from visualisations import visualize_feature_space
-"""
-model.py: 
-"""
 
 class ClassTokenSelector(nn.Module):
     def __init__(self):
@@ -24,59 +21,38 @@ class ClassTokenSelector(nn.Module):
 
 class DirectionLoss(nn.Module):
     def __init__(self, class_weights, opposite_pairs, margin=0.5, pair_weight=0.3):
-        """
-        Simplified loss for head movement classification
-        Args:
-            class_weights (Tensor): Class weights for imbalance [num_classes]
-            opposite_pairs (list): Tuples of opposite classes [(0,1), (2,3)]
-            margin (float): Minimum logit difference between opposites
-            pair_weight (float): Loss weight for opposite penalty
-        """
         super().__init__()
         self.class_weights = class_weights
         self.opposite_pairs = opposite_pairs
         self.margin = margin
         self.pair_weight = pair_weight
-        
-        # Base class-weighted cross-entropy
         self.ce_loss = nn.CrossEntropyLoss(weight=self.class_weights)
         
     def forward(self, outputs, targets):
-        """
-        Args:
-            outputs: Model predictions [batch_size, num_classes]
-            targets: Ground truth labels [batch_size]
-        """
-        # 1. Class-weighted cross-entropy
         ce_loss = self.ce_loss(outputs, targets)
         pair_loss = 0
         
-        # 2. Opposite direction penalty
         for i, j in self.opposite_pairs:
             mask = (targets == i) | (targets == j)
             if mask.sum() == 0:
                 continue
             selected_outputs = outputs[mask]
             selected_targets = targets[mask]
-            # For targets i: ensure output[i] > output[j] + margin
-            # For targets j: ensure output[j] > output[i] + margin
             diff = selected_outputs[:, i] - selected_outputs[:, j]
             diff = torch.where(selected_targets == i, diff, -diff)
             pair_loss += F.relu(self.margin - diff).mean()
                     
-        # Combine losses
         total_loss = ce_loss + self.pair_weight * pair_loss
-        
         return total_loss
 
 class ViTFeatures(nn.Module):
     def __init__(self, vit_model, dropout=0.1):
         super().__init__()
-        # 1. Custom 1-channel projection (input is 224x224)
         self.class_token = vit_model.class_token
         original_conv = vit_model.conv_proj
+        # Modified for 2-channel input
         self.conv_proj = nn.Conv2d(
-            1,  # Single channel input
+            2,  # Changed to two channels
             original_conv.out_channels,
             kernel_size=original_conv.kernel_size,
             stride=original_conv.stride,
@@ -84,72 +60,62 @@ class ViTFeatures(nn.Module):
             bias=False
         )
         
-        # 2. Optimal initialization for radar data
         if vit_model.state_dict():  # Using pretrained weights
-            # Hybrid initialization
             with torch.no_grad():
-                # Average RGB weights to 1-channel
+                # Average RGB weights and expand for two channels
                 radar_weights = original_conv.weight.mean(dim=1, keepdim=True)
-                # Match variance of pretrained weights
+                radar_weights = radar_weights.repeat(1, 2, 1, 1) / 2.0  # Adjusted for two channels
                 std_ratio = original_conv.weight.std() / radar_weights.std()
                 self.conv_proj.weight.copy_(radar_weights * std_ratio)
-        else:  # Training from scratch
-            nn.init.kaiming_normal_(self.conv_proj.weight,
-                                  mode='fan_out',
-                                  nonlinearity='relu')
+        else:
+            nn.init.kaiming_normal_(self.conv_proj.weight, mode='fan_out', nonlinearity='relu')
 
-        # 3. Positional embedding with dropout (no resizing needed)
         self.pos_dropout = nn.Dropout(p=dropout)
         self.encoder = vit_model.encoder
-        self.pos_embedding = vit_model.encoder.pos_embedding  # Already 224x224 compatible
+        self.pos_embedding = vit_model.encoder.pos_embedding
 
     def forward(self, x):
-        # Input: [B, 1, 224, 224]
+        # Input: [B, 2, 224, 224]
         x = self.conv_proj(x)  # [B, 768, 14, 14] 
         x = x.flatten(2).transpose(1, 2)  # [B, 196, 768]
-        
-        # Add class token and position embedding
         class_token = self.class_token.expand(x.shape[0], -1, -1)
         x = torch.cat([class_token, x], dim=1)
         x = x + self.pos_embedding
         x = self.pos_dropout(x)
-        
         return self.encoder(x)
 
 class HeadRadarModel(nn.Module):
-        def __init__(self, features, avgpool, classifier):
-            super().__init__()
-            self.features = features
-            self.avgpool = avgpool
-            self.classifier = classifier
-            
-        def forward(self, x):
-            # Image classification backbone
-            x = self.features(x)
-            # Average pool for classifier
-            x = self.avgpool(x)
-            # Flatten for MLP
-            x = torch.flatten(x, 1)
-            # Run through classifier
-            x = self.classifier(x)
-            return x
+    def __init__(self, features, avgpool, classifier):
+        super().__init__()
+        self.features = features
+        self.avgpool = avgpool
+        self.classifier = classifier
         
-        def get_embeddings(self, x):
-            """Extracts feature embeddings before classification"""
-            with torch.no_grad():
-                x = self.features(x)
-                x = self.avgpool(x)
-                return torch.flatten(x, 1)
+    def forward(self, x):
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
+    
+    def get_embeddings(self, x):
+        with torch.no_grad():
+            x = self.features(x)
+            x = self.avgpool(x)
+            return torch.flatten(x, 1)
 
 def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dims=[256, 128], 
                         use_dropout=False, dropout_rate=0.3, use_batchnorm=False, num_unfrozen_layers=0):
     if model_type == 'vgg16':
         model = vgg16(weights=VGG16_Weights.DEFAULT if use_pretrained else None)
-        # Modify first layer
         original_weight = model.features[0].weight.data
-        new_first_layer = nn.Conv2d(1, 64, kernel_size=3, padding=1)
+        # Modified for 2-channel input
+        new_first_layer = nn.Conv2d(2, 64, kernel_size=3, padding=1)
         if use_pretrained:
-            new_first_layer.weight.data = original_weight.mean(dim=1, keepdim=True)
+            # Average and expand to two channels
+            mean_weights = original_weight.mean(dim=1, keepdim=True)
+            new_weights = mean_weights.repeat(1, 2, 1, 1) / 2.0
+            new_first_layer.weight.data = new_weights
         else:
             nn.init.kaiming_normal_(new_first_layer.weight.data, mode='fan_out', nonlinearity='relu')
         model.features[0] = new_first_layer
@@ -160,10 +126,15 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
     elif model_type == 'resnet50':
         model = resnet50(weights=ResNet50_Weights.DEFAULT if use_pretrained else None)
         original_weight = model.conv1.weight.data
-        new_weight = original_weight.mean(dim=1, keepdim=True) if use_pretrained else nn.init.kaiming_normal_(
-            torch.empty(64, 1, 7, 7, device=original_weight.device), mode='fan_out', nonlinearity='relu')
-        model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        model.conv1.weight.data = new_weight
+        # Modified for 2-channel input
+        model.conv1 = nn.Conv2d(2, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        if use_pretrained:
+            # Average and expand to two channels
+            mean_weights = original_weight.mean(dim=1, keepdim=True)
+            new_weights = mean_weights.repeat(1, 2, 1, 1) / 2.0
+            model.conv1.weight.data = new_weights
+        else:
+            nn.init.kaiming_normal_(model.conv1.weight, mode='fan_out', nonlinearity='relu')
         
         features = nn.Sequential(
             model.conv1, model.bn1, model.relu, model.maxpool,
@@ -178,36 +149,17 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
                 for param in layer.parameters():
                     param.requires_grad = True
 
-
     elif model_type == 'vit':
         model = vit_b_16(weights=ViT_B_16_Weights.DEFAULT if use_pretrained else None)
-        
-        # Modify first convolution for 1-channel input
-        original_conv_proj = model.conv_proj
-        new_conv_proj = nn.Conv2d(1, original_conv_proj.out_channels,
-                                kernel_size=original_conv_proj.kernel_size,
-                                stride=original_conv_proj.stride,
-                                padding=original_conv_proj.padding,
-                                bias=False)
-        
-        # Weight initialization
-        if use_pretrained:
-            new_conv_proj.weight.data = original_conv_proj.weight.data.mean(dim=1, keepdim=True)
-        else:
-            nn.init.kaiming_normal_(new_conv_proj.weight, mode='fan_out', nonlinearity='relu')
-        
-        model.conv_proj = new_conv_proj
+        original_conv = model.conv_proj
+        # Modified for 2-channel input handled in ViTFeatures
         features = ViTFeatures(model)
-        avgpool = ClassTokenSelector()  # Changed from nn.Identity()
+        avgpool = ClassTokenSelector()
         in_features = 768
         
-        # Freeze/unfreeze layers
         if use_pretrained:
-            # Freeze all by default
             for param in features.parameters():
                 param.requires_grad = False
-            
-            # Unfreeze specified number of transformer blocks
             if num_unfrozen_layers > 0:
                 total_layers = len(features.encoder.layers)
                 start_layer = total_layers - num_unfrozen_layers
@@ -219,7 +171,6 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
         for param in features.parameters():
             param.requires_grad = False
 
-    # Build classifier
     classifier_layers = []
     current_dim = in_features
     for dim in hidden_dims:
@@ -235,6 +186,8 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
 
     return HeadRadarModel(features, avgpool, classifier)
 
+# Remaining functions (get_class_names_from_subset, objective, bayesian_optimisation) remain unchanged
+
 def get_class_names_from_subset(dataset):
     """Traverses through NormalizedDataset -> Subset -> original dataset"""
     if hasattr(dataset, 'subset'):
@@ -242,7 +195,7 @@ def get_class_names_from_subset(dataset):
             return dataset.subset.dataset.classes
     return None
 
-def objective(trial, train_dataset, val_dataset, device, class_weights, opposite_pairs):
+def objective(trial, train_dataset, val_dataset, device, class_weights, opposite_pairs, num_classes):
     """ 
     Objective function for optuna. Bayesian optimisation
     """
@@ -415,7 +368,7 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
         run.finish()
         raise e
 
-def bayesian_optimisation(train, val, device, class_weights, opposite_pairs):
+def bayesian_optimisation(train, val, device, class_weights, opposite_pairs, num_classes):
     # Optuna study with W&B callback
     study = optuna.create_study(
         direction='maximize',
@@ -430,7 +383,7 @@ def bayesian_optimisation(train, val, device, class_weights, opposite_pairs):
         #                                      reduction_factor=2)
     )
     study.optimize(
-        lambda trial: objective(trial, train, val, device, class_weights, opposite_pairs),
+        lambda trial: objective(trial, train, val, device, class_weights, opposite_pairs, num_classes),
         n_trials=150
     )
 

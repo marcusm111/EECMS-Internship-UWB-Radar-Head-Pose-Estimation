@@ -9,24 +9,39 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader, ConcatDataset
 import torch
 from model import load_modified_model, DirectionLoss, bayesian_optimisation
-from utils import create_normalised_subsets, load_config
+from utils import create_normalised_subsets, load_config, is_directory_empty
 import torch.optim as optim
 import wandb
 import platform
 from visualisations import visualize_feature_space
+from preprocessing import build_data_directory_structure, verify_training_directory
 torch.manual_seed(42)
 np.random.seed(42)
 
 def main():
-    # Initialise 
+    # Initialise device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     if platform.system() == "Windows":
         os.environ["WANDB_SYMLINK"] = "false"
+    
+    # Load config
     config = load_config("config.yaml")
 
+    data_path = config["data"]
+    os.makedirs(data_path, exist_ok=True)
+
+    training_dir = os.path.join(data_path, "training_data")
+    # Load and check data structure
+    build_data_directory_structure(data_path)
+    
+    # Verify data and create combined tensors
+    verify_training_directory(training_dir, config["rebuild_tensors"])
+
+    tensor_path = os.path.join(training_dir, "tensor_data")
+
    # Load raw timefrequencymap dataset
-    raw_dataset = TimeFrequencyMapDataset(config["clean_data"], compute_stats=False)
+    raw_dataset = TimeFrequencyMapDataset(tensor_path, compute_stats=False)
 
     # Split for training
     train, val, test, class_weights, opposite_pairs = create_normalised_subsets(raw_dataset, device)
@@ -43,7 +58,7 @@ def main():
     if config["bayesian_optimisation"]:
         # Find and use best params
         print("Using bayesian optimisation")
-        params = bayesian_optimisation(train, val, device, class_weights, opposite_pairs)
+        params = bayesian_optimisation(train, val, device, class_weights, opposite_pairs, config["num_classes"])
         model_params = {
         'model_type': params['model_type'],
         'use_pretrained': params['use_pretrained'],
@@ -60,7 +75,7 @@ def main():
         model_params = params["model_params"]
 
     # Load model type
-    model = load_modified_model(num_classes=5, **model_params).to(device)
+    model = load_modified_model(num_classes=config["num_classes"], **model_params).to(device)
     full_train = ConcatDataset([train, val])
     train_loader = DataLoader(full_train, 
                             batch_size=params['batch_size'], 

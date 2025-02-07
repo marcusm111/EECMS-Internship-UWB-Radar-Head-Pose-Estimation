@@ -1,28 +1,128 @@
 import os
 import shutil
 import math
+import torch
 
-def build_dataset(data_path):
-    os.makedirs("data", exist_ok=True)
-    os.makedirs(os.path.join("data", "Down"), exist_ok=True)
-    os.makedirs(os.path.join("data", "No_Movement"), exist_ok=True)
-    os.makedirs(os.path.join("data", "Right"), exist_ok=True)
-    os.makedirs(os.path.join("data", "Left"), exist_ok=True)
-    os.makedirs(os.path.join("data", "Up"), exist_ok=True)
-    for sub_directory in [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]:
-        sub_dir_path = os.path.join(data_path, sub_directory)
+def torch_genfromtxt(file_path, delimiter=",", dtype=torch.float32):
+    """
+    Load a matrix from a text file into a PyTorch tensor.
+    Mimics basic functionality of `np.genfromtxt`.
+    """
+    data = []
+    with open(file_path, "r") as f:
+        for line in f:
+            # Split line into elements and convert to floats
+            elements = line.strip().split(delimiter)
+            row = [float(e) for e in elements if e]  # Skip empty strings
+            data.append(row)
+    # Convert to tensor and handle ragged rows (if necessary)
+    tensor = torch.tensor(data, dtype=dtype)
+    return tensor
+
+def build_data_directory_structure(data_path):
+    # Build data structure
+    os.makedirs(os.path.join(data_path, "training_data"), exist_ok=True)
+    os.makedirs(os.path.join(data_path, "test_data"), exist_ok=True)
+    os.makedirs(os.path.join(data_path, "training_data", "old_data"), exist_ok=True)
+    os.makedirs(os.path.join(data_path, "training_data", "raw_data"), exist_ok=True)
+    os.makedirs(os.path.join(data_path, "training_data", "clean_data"), exist_ok=True)
+
+def build_dataset_structure(dir):
+    # Make class directories
+    os.makedirs(os.path.join(dir, "Down"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "No_Movement"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Right45"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Right90"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Left45"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Left90"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Up"), exist_ok=True)
+
+def build_dataset(clean_dir, raw_dir):
+    # For each class
+    for sub_directory in [d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d))]:
+        sub_dir_path = os.path.join(raw_dir, sub_directory)
+        # For sample in class
         for file in [f for f in os.listdir(sub_dir_path) if os.path.isfile(os.path.join(sub_dir_path, f))]:
-            if file.endswith("txt") and "BROKEN" not in file:
-                if "Down" in file:
-                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Down", file))
-                elif "No Movement" in file:
-                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "No_Movement", file))
-                elif "Right" in file:
-                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Right", file))
-                elif "Left" in file:
-                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Left", file))
-                elif "Up" in file:
-                    shutil.copy(os.path.join(data_path, sub_directory, file), os.path.join("data", "Up", file))
+            if file.endswith("txt"):
+                shutil.copy(os.path.join(raw_dir, sub_directory, file), os.path.join(clean_dir, sub_directory, file))
+
+
+def save_combined_tensors(data_path):
+    tensors_path = os.path.join(data_path, "tensor_data")
+    os.makedirs(tensors_path, exist_ok=True)
+    build_dataset_structure(tensors_path)
+    clean_data_path = os.path.join(data_path, "clean_data")
+    
+    for class_dir in  os.listdir(clean_data_path):
+        class_full_dir = os.path.join(clean_data_path, class_dir)
+        measurements_list = os.listdir(class_full_dir)
+        for measurement in measurements_list:
+            if measurement.endswith("txt") and "s1" in measurement:
+                measurement_list = list(measurement)
+                measurement_list[1] = "2"
+                corresponding_measurement = "".join(measurement_list)
+                measurement_path = os.path.join(class_full_dir, measurement)
+                corresponding_measurement_path = os.path.join(class_full_dir, corresponding_measurement)
+                tensor_one = torch_genfromtxt(measurement_path)
+                tensor_two = torch_genfromtxt(corresponding_measurement_path)
+                combined_tensor = torch.stack([tensor_one, tensor_two], 0)
+                tag = measurement[2:-4]
+                current_tensor_path = os.path.join(tensors_path, class_dir, tag + ".pt")
+                torch.save(combined_tensor, current_tensor_path)
+
+
+def verify_training_directory(data_path, rebuild_tensors=False):
+    # Input should be data/training_data
+    clean_dir_path = os.path.join(data_path, "clean_data")
+    raw_dir_path = os.path.join(data_path, "raw_data")
+    clean_dir = os.listdir(clean_dir_path)
+    raw_dir = os.listdir(raw_dir_path)
+
+
+    if len(clean_dir) == 0:
+        build_dataset_structure(clean_dir_path)
+
+    # Check if the subdirectories are empty
+    if len([d for d in clean_dir if len(os.listdir(os.path.join(clean_dir_path, d))) > 0 ]) == 0:
+        # Training directory empty, check for raw data
+        if len(raw_dir) == 0:
+            # No training or raw data
+            print("No training or raw data, please put raw data in raw_data")
+            return False
+        
+        # Clean nans
+        # Re-initialise clean_dir list
+        raw_dir = os.listdir(raw_dir_path)
+        clean_infinities_and_save(raw_dir_path, clean_dir_path)
+
+    # Check each sample has a matching from the other sensor
+    clean_dir = os.listdir(clean_dir_path)
+    complete_match = True
+    for class_dir in clean_dir:
+        class_full_dir = os.path.join(clean_dir_path, class_dir)
+        measurements_list = os.listdir(class_full_dir)
+        num_measurements = len(measurements_list)
+        total_num_samples = num_measurements // 2
+        num_samples = 0
+        for measurement in measurements_list:
+            if measurement.endswith("txt") and "s1" in measurement:
+                measurement_list = list(measurement)
+                measurement_list[1] = "2"
+                corresponding_measurement = "".join(measurement_list)
+
+                if corresponding_measurement in measurements_list:
+                    num_samples += 1
+                else:
+                    print(f"No corresponding measurement to: {measurement}")
+
+        if num_samples != total_num_samples:
+            print(f"Invalid measurement alignment in class: {class_dir}")
+            complete_match = False
+
+        print(f"Num samples: {num_samples}, num_measurements: {num_measurements}")
+
+    if complete_match and (not os.path.exists(os.path.join(data_path, "tensor_data")) or rebuild_tensors):
+        save_combined_tensors(data_path)
 
 
 def check_directory_for_nans(directory, delimiter=","):
@@ -37,9 +137,11 @@ def check_directory_for_nans(directory, delimiter=","):
         delimiter (str): Column delimiter used in the files
     """
     problematic_files = []
+    files_checked = 0
 
     for root, dirs, files in os.walk(directory):
         for file in files:
+            files_checked += 1
             if file.endswith(".txt"):
                 file_path = os.path.join(root, file)
                 has_nan = False
@@ -83,7 +185,7 @@ def check_directory_for_nans(directory, delimiter=","):
     # Print summary
     print("\n=== Summary ===")
     if not problematic_files:
-        print("✅ All files are clean - no NaNs, infs, or invalid values found")
+        print(f"✅ All {files_checked} files are clean - no NaNs, infs, or invalid values found")
     else:
         print(f"❌ Found issues in {len(problematic_files)} files:")
         for file_info in problematic_files:
@@ -167,15 +269,3 @@ def clean_infinities_and_save(input_dir, output_dir, delimiter=","):
     print(f"Total NaNs replaced: {total_nan}")
     print(f"Total invalid entries replaced: {total_invalid}")
     print(f"\nCleaned files saved to: {output_dir}")
-
-build_dataset("raw_data")
-
-# Usage example:
-main_directory = "data"
-for sub_directory in os.listdir(main_directory):
-    check_directory_for_nans(os.path.join(main_directory, sub_directory))
-
-cleaned_data = "clean_data"
-
-for sub_directory in os.listdir(main_directory):
-    clean_infinities_and_save(os.path.join(main_directory, sub_directory), os.path.join(cleaned_data, sub_directory), delimiter=",")
