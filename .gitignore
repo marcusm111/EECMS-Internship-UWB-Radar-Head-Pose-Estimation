@@ -4,4 +4,5 @@ machine-learning/data/
 machine-learning/raw_data/
 machine-learning/wandb/
 machine-learning/old_data
+machine-learning/final_head_movement_model.pth
 .DS_Store
