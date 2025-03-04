@@ -8,7 +8,7 @@ from timefrequencydataset import TimeFrequencyMapDataset
 from tqdm import tqdm
 from torch.utils.data import DataLoader, ConcatDataset
 import torch
-from model import load_modified_model, DirectionLoss, bayesian_optimisation
+from model import load_modified_model, bayesian_optimisation
 from utils import create_normalised_subsets, load_config, is_directory_empty
 import torch.optim as optim
 import wandb
@@ -44,21 +44,16 @@ def main():
     raw_dataset = TimeFrequencyMapDataset(tensor_path, compute_stats=False)
 
     # Split for training
-    train, val, test, class_weights, opposite_pairs = create_normalised_subsets(raw_dataset, device)
+    train, val, test, class_weights = create_normalised_subsets(raw_dataset, device)
 
     # Custom loss function to help differentiate between opposite pairs, left and right, up and down
-    criterion = DirectionLoss(
-        class_weights=class_weights.to(device),
-        opposite_pairs=opposite_pairs,
-        margin=0.5,
-        pair_weight=0.3
-    ).to(device)
+    criterion = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))  
 
     # Get model parameters
     if config["bayesian_optimisation"]:
         # Find and use best params
         print("Using bayesian optimisation")
-        params = bayesian_optimisation(train, val, device, class_weights, opposite_pairs, config["num_classes"])
+        params = bayesian_optimisation(train, val, device, class_weights, config["num_classes"])
         model_params = {
         'model_type': params['model_type'],
         'use_pretrained': params['use_pretrained'],
@@ -97,13 +92,6 @@ def main():
         optimizer = optim.SGD(**optimizer_config)
     else:
         optimizer = optim.Adam(**optimizer_config)
-
-    criterion = DirectionLoss(
-        class_weights=class_weights.to(device),
-        opposite_pairs=opposite_pairs,
-        margin=0.5,
-        pair_weight=0.3
-    ).to(device)
 
     best_acc = 0
     patience = params['patience']

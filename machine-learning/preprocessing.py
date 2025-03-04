@@ -31,10 +31,12 @@ def build_dataset_structure(dir):
     # Make class directories
     os.makedirs(os.path.join(dir, "Down"), exist_ok=True)
     os.makedirs(os.path.join(dir, "No_Movement"), exist_ok=True)
-    os.makedirs(os.path.join(dir, "Right45"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Right30"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Right60"), exist_ok=True)
     os.makedirs(os.path.join(dir, "Right90"), exist_ok=True)
-    os.makedirs(os.path.join(dir, "Left45"), exist_ok=True)
     os.makedirs(os.path.join(dir, "Left90"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Left30"), exist_ok=True)
+    os.makedirs(os.path.join(dir, "Left60"), exist_ok=True)
     os.makedirs(os.path.join(dir, "Up"), exist_ok=True)
 
 def build_dataset(clean_dir, raw_dir):
@@ -57,19 +59,26 @@ def save_combined_tensors(data_path):
         class_full_dir = os.path.join(clean_data_path, class_dir)
         measurements_list = os.listdir(class_full_dir)
         for measurement in measurements_list:
-            if measurement.endswith("txt") and "s1" in measurement:
+            if measurement.endswith("txt") and "sF" in measurement:
                 measurement_list = list(measurement)
-                measurement_list[1] = "2"
-                corresponding_measurement = "".join(measurement_list)
+                # Create left name
+                measurement_list[1] = "L"
+                left_corresponding_measurement = "".join(measurement_list)
+                # Create right name
+                measurement_list[1] = "R"
+                right_corresponding_measurement = "".join(measurement_list)
+                # Create paths
                 measurement_path = os.path.join(class_full_dir, measurement)
-                corresponding_measurement_path = os.path.join(class_full_dir, corresponding_measurement)
-                tensor_one = torch_genfromtxt(measurement_path)
-                tensor_two = torch_genfromtxt(corresponding_measurement_path)
-                combined_tensor = torch.stack([tensor_one, tensor_two], 0)
-                tag = measurement[2:-4]
-                current_tensor_path = os.path.join(tensors_path, class_dir, tag + ".pt")
-                torch.save(combined_tensor, current_tensor_path)
-
+                left_measurement_path = os.path.join(class_full_dir, left_corresponding_measurement)
+                right_measurement_path = os.path.join(class_full_dir, right_corresponding_measurement)
+                if os.path.exists(left_measurement_path) and os.path.exists(right_measurement_path): 
+                    tensor_front = torch_genfromtxt(measurement_path)
+                    tensor_left = torch_genfromtxt(left_measurement_path)
+                    tensor_right = torch_genfromtxt(right_measurement_path)
+                    combined_tensor = torch.stack([tensor_front, tensor_left, tensor_right], 0)
+                    tag = measurement[2:-4]
+                    current_tensor_path = os.path.join(tensors_path, class_dir, tag + ".pt")
+                    torch.save(combined_tensor, current_tensor_path)
 
 def verify_training_directory(data_path, rebuild_tensors=False):
     # Input should be data/training_data
@@ -102,15 +111,17 @@ def verify_training_directory(data_path, rebuild_tensors=False):
         class_full_dir = os.path.join(clean_dir_path, class_dir)
         measurements_list = os.listdir(class_full_dir)
         num_measurements = len(measurements_list)
-        total_num_samples = num_measurements // 2
+        total_num_samples = num_measurements // 3
         num_samples = 0
         for measurement in measurements_list:
-            if measurement.endswith("txt") and "s1" in measurement:
+            if measurement.endswith("txt") and "sF"in measurement:
                 measurement_list = list(measurement)
-                measurement_list[1] = "2"
-                corresponding_measurement = "".join(measurement_list)
+                measurement_list[1] = "R"
+                right_measurement = "".join(measurement_list)
+                measurement_list[1] = "L"
+                left_measurement = "".join(measurement_list)
 
-                if corresponding_measurement in measurements_list:
+                if (left_measurement in measurements_list) and (right_measurement in measurements_list):
                     num_samples += 1
                 else:
                     print(f"No corresponding measurement to: {measurement}")

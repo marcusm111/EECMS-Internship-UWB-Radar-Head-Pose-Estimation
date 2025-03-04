@@ -10,7 +10,6 @@ import optuna
 from torch.utils.data import DataLoader
 import wandb
 import platform
-import torch.nn.functional as F 
 from visualisations import visualize_feature_space
 
 class ClassTokenSelector(nn.Module):
@@ -19,40 +18,14 @@ class ClassTokenSelector(nn.Module):
     def forward(self, x):
         return x[:, 0]
 
-class DirectionLoss(nn.Module):
-    def __init__(self, class_weights, opposite_pairs, margin=0.5, pair_weight=0.3):
-        super().__init__()
-        self.class_weights = class_weights
-        self.opposite_pairs = opposite_pairs
-        self.margin = margin
-        self.pair_weight = pair_weight
-        self.ce_loss = nn.CrossEntropyLoss(weight=self.class_weights)
-        
-    def forward(self, outputs, targets):
-        ce_loss = self.ce_loss(outputs, targets)
-        pair_loss = 0
-        
-        for i, j in self.opposite_pairs:
-            mask = (targets == i) | (targets == j)
-            if mask.sum() == 0:
-                continue
-            selected_outputs = outputs[mask]
-            selected_targets = targets[mask]
-            diff = selected_outputs[:, i] - selected_outputs[:, j]
-            diff = torch.where(selected_targets == i, diff, -diff)
-            pair_loss += F.relu(self.margin - diff).mean()
-                    
-        total_loss = ce_loss + self.pair_weight * pair_loss
-        return total_loss
-
 class ViTFeatures(nn.Module):
     def __init__(self, vit_model, dropout=0.1):
         super().__init__()
         self.class_token = vit_model.class_token
         original_conv = vit_model.conv_proj
-        # Modified for 2-channel input
+        # Modified for 3-channel input
         self.conv_proj = nn.Conv2d(
-            2,  # Changed to two channels
+            3,  # Changed to three channels
             original_conv.out_channels,
             kernel_size=original_conv.kernel_size,
             stride=original_conv.stride,
@@ -62,11 +35,8 @@ class ViTFeatures(nn.Module):
         
         if vit_model.state_dict():  # Using pretrained weights
             with torch.no_grad():
-                # Average RGB weights and expand for two channels
-                radar_weights = original_conv.weight.mean(dim=1, keepdim=True)
-                radar_weights = radar_weights.repeat(1, 2, 1, 1) / 2.0  # Adjusted for two channels
-                std_ratio = original_conv.weight.std() / radar_weights.std()
-                self.conv_proj.weight.copy_(radar_weights * std_ratio)
+                # Directly use original RGB weights
+                self.conv_proj.weight.copy_(original_conv.weight)
         else:
             nn.init.kaiming_normal_(self.conv_proj.weight, mode='fan_out', nonlinearity='relu')
 
@@ -75,7 +45,7 @@ class ViTFeatures(nn.Module):
         self.pos_embedding = vit_model.encoder.pos_embedding
 
     def forward(self, x):
-        # Input: [B, 2, 224, 224]
+        # Input: [B, 3, 224, 224]
         x = self.conv_proj(x)  # [B, 768, 14, 14] 
         x = x.flatten(2).transpose(1, 2)  # [B, 196, 768]
         class_token = self.class_token.expand(x.shape[0], -1, -1)
@@ -109,13 +79,11 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
     if model_type == 'vgg16':
         model = vgg16(weights=VGG16_Weights.DEFAULT if use_pretrained else None)
         original_weight = model.features[0].weight.data
-        # Modified for 2-channel input
-        new_first_layer = nn.Conv2d(2, 64, kernel_size=3, padding=1)
+        # Modified for 3-channel input
+        new_first_layer = nn.Conv2d(3, 64, kernel_size=3, padding=1)
         if use_pretrained:
-            # Average and expand to two channels
-            mean_weights = original_weight.mean(dim=1, keepdim=True)
-            new_weights = mean_weights.repeat(1, 2, 1, 1) / 2.0
-            new_first_layer.weight.data = new_weights
+            # Use original RGB weights
+            new_first_layer.weight.data = original_weight
         else:
             nn.init.kaiming_normal_(new_first_layer.weight.data, mode='fan_out', nonlinearity='relu')
         model.features[0] = new_first_layer
@@ -126,13 +94,11 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
     elif model_type == 'resnet50':
         model = resnet50(weights=ResNet50_Weights.DEFAULT if use_pretrained else None)
         original_weight = model.conv1.weight.data
-        # Modified for 2-channel input
-        model.conv1 = nn.Conv2d(2, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        # Modified for 3-channel input
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
         if use_pretrained:
-            # Average and expand to two channels
-            mean_weights = original_weight.mean(dim=1, keepdim=True)
-            new_weights = mean_weights.repeat(1, 2, 1, 1) / 2.0
-            model.conv1.weight.data = new_weights
+            # Use original RGB weights
+            model.conv1.weight.data = original_weight
         else:
             nn.init.kaiming_normal_(model.conv1.weight, mode='fan_out', nonlinearity='relu')
         
@@ -152,7 +118,7 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
     elif model_type == 'vit':
         model = vit_b_16(weights=ViT_B_16_Weights.DEFAULT if use_pretrained else None)
         original_conv = model.conv_proj
-        # Modified for 2-channel input handled in ViTFeatures
+        # Modified for 3-channel input handled in ViTFeatures
         features = ViTFeatures(model)
         avgpool = ClassTokenSelector()
         in_features = 768
@@ -191,21 +157,16 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
 def get_class_names_from_subset(dataset):
     """Traverses through NormalizedDataset -> Subset -> original dataset"""
     if hasattr(dataset, 'subset'):
-        if hasattr(dataset.subset, 'dataset') and hasattr(dataset.subset.dataset, 'classes'):
+        if hasattr(dataset.subset.dataset, 'classes'):
             return dataset.subset.dataset.classes
     return None
 
-def objective(trial, train_dataset, val_dataset, device, class_weights, opposite_pairs, num_classes):
-    """ 
-    Objective function for optuna. Bayesian optimisation
-    """
-    """Objective function with W&B logging"""
+def objective(trial, train_dataset, val_dataset, device, class_weights, num_classes):
     if platform.system() == "Windows":
         os.environ["WANDB_SYMLINK"] = "false"
 
     class_names = get_class_names_from_subset(val_dataset)
 
-    # Initialize W&B run for this trial
     run = wandb.init(
         project="radar-head-movement",
         group="optuna-study",
@@ -217,18 +178,15 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
     )
 
     try:
-
-        # Get base parameters first
         model_type = trial.suggest_categorical('model_type', ['vgg16', 'resnet50', 'vit'])
         use_pretrained = trial.suggest_categorical('use_pretrained', [True, False])
         
-        # Conditionally suggest num_unfrozen_layers
         num_unfrozen_layers = 0
         if use_pretrained:
             if model_type == 'resnet50':
                 num_unfrozen_layers = trial.suggest_int('resnet_unfrozen_layers', 0, 4)
             elif model_type == 'vit':
-                num_unfrozen_layers = trial.suggest_int('vit_unfrozen_layers', 0, 12)  # ViT-B has 12 layers
+                num_unfrozen_layers = trial.suggest_int('vit_unfrozen_layers', 0, 12)
 
         params = {
             'model_type': model_type,
@@ -254,11 +212,9 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
 
         wandb.config.update(params)
 
-        # Data loaders
         train_loader = DataLoader(train_dataset, batch_size=params['batch_size'], shuffle=True, pin_memory=(device.type == 'cuda'))
         val_loader = DataLoader(val_dataset, batch_size=params['batch_size'], pin_memory=(device.type == 'cuda'))
 
-        # Model
         model_params = {
             'model_type': params['model_type'],
             'use_pretrained': params['use_pretrained'],
@@ -268,9 +224,8 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
             'use_batchnorm': params['use_batchnorm'],
             'num_unfrozen_layers': params.get('num_unfrozen_layers', 0),
         }
-        model = load_modified_model(num_classes=5, **model_params).to(device)
+        model = load_modified_model(num_classes=num_classes, **model_params).to(device)
 
-        # Optimizer
         optimizer_config = {
             'params': filter(lambda p: p.requires_grad, model.parameters()),
             'lr': params['lr'],
@@ -282,19 +237,13 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
         else:
             optimizer = optim.Adam(**optimizer_config)
         
-        criterion = DirectionLoss(
-            class_weights=class_weights,
-            opposite_pairs=opposite_pairs,
-            margin=0.5,
-            pair_weight=0.3
-        )
+        criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
 
-        # Training loop with augmentation
         best_val_acc = 0
         epochs_no_improve = 0
         best_weights = None
         
-        for epoch in range(200):  # Increased max epochs
+        for epoch in range(200):
             model.train()
             train_loss = 0
             for inputs, labels in train_loader:
@@ -310,12 +259,8 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
                 train_loss += loss.item()
 
             avg_train_loss = train_loss / len(train_loader)
-            wandb.log({
-            "train_loss": avg_train_loss,
-            "epoch": epoch
-            })
+            wandb.log({"train_loss": avg_train_loss, "epoch": epoch})
 
-            # Validation
             model.eval()
             correct, total = 0, 0
             val_loss = 0
@@ -330,13 +275,8 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
             val_acc = correct / total
             trial.report(val_acc, epoch)
 
-            wandb.log({
-                "val_acc": val_acc,
-                "epoch": epoch,
-                "val_loss": val_loss/len(val_loader) 
-            })
+            wandb.log({"val_acc": val_acc, "epoch": epoch, "val_loss": val_loss/len(val_loader)})
 
-            # Early stopping
             if val_acc > best_val_acc + params['min_delta']:
                 best_val_acc = val_acc
                 epochs_no_improve = 0
@@ -350,46 +290,37 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, opposite
 
         if best_weights:
             model.load_state_dict(best_weights)
-
-            val_loader = DataLoader(val_dataset, batch_size=params['batch_size'], pin_memory=(device.type == 'cuda'))
             visualize_feature_space(
                 model=model,
                 dataloader=val_loader,
                 device=device,
                 class_names=class_names
             )
-            
 
         run.finish()
         return best_val_acc
     
-
     except Exception as e:
         run.finish()
         raise e
 
-def bayesian_optimisation(train, val, device, class_weights, opposite_pairs, num_classes):
-    # Optuna study with W&B callback
+def bayesian_optimisation(train, val, device, class_weights, num_classes):
     study = optuna.create_study(
         direction='maximize',
         sampler=optuna.samplers.TPESampler(
-        multivariate=True,
-        group=True,  # ← Better for conditional parameters
-        n_startup_trials=50  
+            multivariate=True,
+            group=True,
+            n_startup_trials=50  
         ),
         pruner=None
-        #pruner=optuna.pruners.HyperbandPruner(min_resource=30, 
-        #                                      max_resource=50, 
-        #                                      reduction_factor=2)
     )
     study.optimize(
-        lambda trial: objective(trial, train, val, device, class_weights, opposite_pairs, num_classes),
+        lambda trial: objective(trial, train, val, device, class_weights, num_classes),
         n_trials=150
     )
 
     wandb.init(project="radar-head-movement", name="final-model")
 
-    # Best trial results
     print("\nBest trial:")
     trial = study.best_trial
     print(f"Validation accuracy: {trial.value:.4f}")
@@ -397,7 +328,4 @@ def bayesian_optimisation(train, val, device, class_weights, opposite_pairs, num
     for key, value in trial.params.items():
         print(f"  {key}: {value}")
 
-    # Final model training
-    best_params = trial.params
-
-    return best_params
+    return trial.params

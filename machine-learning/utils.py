@@ -3,6 +3,20 @@ from torch.utils.data import Dataset, Subset
 from sklearn.model_selection import StratifiedShuffleSplit
 import numpy as np
 import yaml
+import os
+
+def is_directory_empty(directory):
+    # Check if the directory exists
+    if not os.path.exists(directory):
+        return True  # or raise an error, depending on your use case
+
+    # Check if the directory contains any files
+    with os.scandir(directory) as it:
+        for entry in it:
+            if entry.is_file():
+                return False  # Directory contains at least one file
+    return True  # Directory is empty or contains only subdirectories
+
 
 class NormalizedDataset(Dataset):
     def __init__(self, subset, mean, std):
@@ -59,17 +73,13 @@ def create_normalised_subsets(raw_dataset, device):
     test = NormalizedDataset(test_subset, train_mean, train_std)
 
     class_to_idx = {name: i for i, name in enumerate(raw_dataset.classes)}
-    opposite_pairs = [
-        (class_to_idx["Left"], class_to_idx["Right"]),
-        (class_to_idx["Down"], class_to_idx["Up"])
-    ]
+    
     print("\nClass Verification:")
-    print(f"{'Class Name':<15} | {'Index':<5} | {'Opposite Pair'}")
+    print(f"{'Class Name':<15} | {'Index':<5}")
     for name, idx in class_to_idx.items():
-        opposites = [pair for pair in opposite_pairs if idx in pair]
-        print(f"{name:<15} | {idx:<5} | {opposites}")
+        print(f"{name:<15} | {idx:<5}")
 
-    return train, val, test, class_weights, opposite_pairs
+    return train, val, test, class_weights
 
 def load_config(config_path: str) -> dict:
     with open(config_path, "r") as f:

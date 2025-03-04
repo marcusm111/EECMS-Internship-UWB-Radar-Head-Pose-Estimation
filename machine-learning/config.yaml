@@ -1,7 +1,7 @@
 # Data config
 data: "data"
 rebuild_tensors: True # We save and combine .txt files into tensors for easier training
-num_classes: 7
+num_classes: 9
 
 # Toggle activities
 train_model: True
