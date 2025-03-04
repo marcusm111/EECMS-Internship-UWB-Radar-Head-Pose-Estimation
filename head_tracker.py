@@ -4,7 +4,7 @@ import mediapipe as mp
 import math
 
 # Input and output video paths
-input_video = "c1p1r1.mp4"
+input_video = 0
 output_video = "head_pose_output_mediapipe.mp4"
 
 # Initialize MediaPipe Face Mesh
@@ -21,15 +21,16 @@ drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1, color=(0, 25
 # Open input video
 cap = cv2.VideoCapture(input_video)
 
-# Get video properties
+# Get original video properties
 fps = int(cap.get(cv2.CAP_PROP_FPS))
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+cropped_width = orig_width // 2  # Use only the right half
 
-# Create VideoWriter object
+# Create VideoWriter object with new width
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
+out = cv2.VideoWriter(output_video, fourcc, fps, (cropped_width, height))
 
 # Face mesh key points indices for pose estimation
 NOSE_TIP = 4
@@ -52,10 +53,15 @@ model_points = np.array([
 ], dtype=np.float64)
 
 frame_idx = 0
-while cap.isOpened():
+while cap.isOpened() and frame_idx < 100:
     ret, frame = cap.read()
     if not ret:
         break
+
+    # Crop the right half of the frame (assumes a perfect vertical split)
+    frame = frame[:, orig_width // 2:orig_width]
+    # Update the width to match the cropped frame
+    width = frame.shape[1]
 
     # Update progress
     frame_idx += 1
@@ -84,7 +90,7 @@ while cap.isOpened():
                 (int(landmarks[FOREHEAD].x * width), int(landmarks[FOREHEAD].y * height))
             ], dtype="double")
             
-            # Camera parameters
+            # Camera parameters (updated for cropped frame)
             focal_length = width
             center = (width / 2, height / 2)
             camera_matrix = np.array(
@@ -103,39 +109,21 @@ while cap.isOpened():
                 # Convert rotation vector to rotation matrix
                 rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
                 
-                # DIRECT CALCULATION OF ANGLES FROM ROTATION MATRIX
-                # This avoids multiple conventions and issues with different libraries
-                
-                # Extract rotations directly - more stable than converting to Euler angles
-                
-                # PITCH - rotation around X-axis (up/down)
-                # Use arcsin of the element that represents how much the Z axis is pointing up/down
-                sin_pitch = -rotation_matrix[2, 0]  # Element that represents pitch
+                # Calculate angles directly from rotation matrix
+                sin_pitch = -rotation_matrix[2, 0]
                 pitch_deg = math.degrees(math.asin(sin_pitch))
                 
-                # YAW - rotation around Y-axis (left/right)
-                # We need to handle the case where pitch is close to +/-90 degrees (gimbal lock)
-                if abs(sin_pitch) > 0.99:  # Close to +/-90 degrees pitch
-                    # In gimbal lock, we can't separate yaw and roll clearly
-                    # Set yaw using the rotation around Y when looking straight up/down
+                if abs(sin_pitch) > 0.99:
                     yaw_deg = math.degrees(math.atan2(rotation_matrix[0, 1], rotation_matrix[1, 1]))
                 else:
-                    # Normal case - extract yaw from the rotated Z axis projection
                     yaw_deg = math.degrees(math.atan2(rotation_matrix[2, 1], rotation_matrix[2, 2]))
                 
-                # ROLL - rotation around Z-axis (tilt left/right)
-                if abs(sin_pitch) > 0.99:  # Close to +/-90 degrees pitch
-                    # In gimbal lock, roll is not well-defined
-                    roll_deg = 0.0  # Set to zero when in gimbal lock
+                if abs(sin_pitch) > 0.99:
+                    roll_deg = 0.0
                 else:
-                    # Normal case - use the rotated X axis to determine roll
                     roll_deg = math.degrees(math.atan2(rotation_matrix[1, 0], rotation_matrix[0, 0]))
                 
-                # Make sure the directions are intuitive:
-                # - Looking up: positive pitch
-                # - Looking right: positive yaw
-                # - Tilting head right: positive roll
-                pitch_deg = pitch_deg
+                # Adjust signs for intuitive directions
                 yaw_deg = -yaw_deg
                 roll_deg = -roll_deg
                 
@@ -144,7 +132,7 @@ while cap.isOpened():
                 yaw_text = f"Yaw: {yaw_deg:.2f}"
                 roll_text = f"Roll: {roll_deg:.2f}"
                 
-                # Add visual indicators to help understand the angles
+                # Determine movement text based on thresholds
                 movement_text = ""
                 if abs(pitch_deg) > 15:
                     movement_text += "Head " + ("UP" if pitch_deg > 0 else "DOWN") + " "
@@ -157,14 +145,14 @@ while cap.isOpened():
                 axis_length = 70
                 nose = (int(image_points[0][0]), int(image_points[0][1]))
                 
-                # Project axes
+                # Define 3D axes points
                 axis_points = np.array([
-                    [axis_length, 0, 0],      # X-axis (red) - right/left
-                    [0, axis_length, 0],      # Y-axis (green) - down/up
-                    [0, 0, axis_length]       # Z-axis (blue) - forward/backward
+                    [axis_length, 0, 0],      # X-axis (red)
+                    [0, axis_length, 0],      # Y-axis (green)
+                    [0, 0, axis_length]       # Z-axis (blue)
                 ], dtype=np.float64)
                 
-                # Project all axis points at once
+                # Project the 3D axis points to the image plane
                 projected_points, _ = cv2.projectPoints(
                     axis_points, 
                     rotation_vector, 
@@ -173,26 +161,22 @@ while cap.isOpened():
                     dist_coeffs
                 )
                 
-                # Extract the projected points
                 x_end = (int(nose[0] + projected_points[0][0][0]), int(nose[1] + projected_points[0][0][1]))
                 y_end = (int(nose[0] + projected_points[1][0][0]), int(nose[1] + projected_points[1][0][1]))
                 z_end = (int(nose[0] + projected_points[2][0][0]), int(nose[1] + projected_points[2][0][1]))
                 
-                # Draw axes lines
                 cv2.line(frame, nose, x_end, (0, 0, 255), 2)    # X-axis (red)
-                cv2.line(frame, nose, y_end, (0, 255, 0), 2)    # Y-axis (green)
-                cv2.line(frame, nose, z_end, (255, 0, 0), 2)    # Z-axis (blue)
+                cv2.line(frame, nose, y_end, (0, 255, 0), 2)      # Y-axis (green)
+                cv2.line(frame, nose, z_end, (255, 0, 0), 2)      # Z-axis (blue)
                 
-                # Add labels for the axes
                 cv2.putText(frame, "X", x_end, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                 cv2.putText(frame, "Y", y_end, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 cv2.putText(frame, "Z", z_end, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-            
-                # Add explanation of what the axes mean
+                
                 angle_explanation = "PITCH: Up(+)/down(-) | YAW: Right(+)/left(-) | ROLL: Tilt right(+)/left(-)"
                 cv2.putText(frame, angle_explanation, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
             
-            # Draw the face mesh wireframe for visualization (optional)
+            # Draw the face mesh for visualization (optional)
             mp_drawing.draw_landmarks(
                 image=frame,
                 landmark_list=face_landmarks,
@@ -201,7 +185,7 @@ while cap.isOpened():
                 connection_drawing_spec=mp_drawing.DrawingSpec(thickness=1, circle_radius=1, color=(0, 255, 0))
             )
             
-            # Get bounding box for text placement
+            # Calculate bounding box for text placement
             h, w, _ = frame.shape
             x_min = w
             y_min = h
@@ -210,31 +194,24 @@ while cap.isOpened():
             
             for lm in face_landmarks.landmark:
                 x, y = int(lm.x * w), int(lm.y * h)
-                if x < x_min:
-                    x_min = x
-                if y < y_min:
-                    y_min = y
-                if x > x_max:
-                    x_max = x
-                if y > y_max:
-                    y_max = y
+                x_min = min(x_min, x)
+                y_min = min(y_min, y)
+                x_max = max(x_max, x)
+                y_max = max(y_max, y)
             
-            # Draw text on the frame
             cv2.putText(frame, pitch_text, (x_min, y_min - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(frame, yaw_text, (x_min, y_min - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(frame, roll_text, (x_min, y_min - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
-            # Add additional movement text
             if movement_text:
                 cv2.putText(frame, movement_text, (x_min, y_min - 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
     else:
-        # If no face is detected
         cv2.putText(frame, "No face detected", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
     
-    # Write frame to output
+    # Write the processed frame to output
     out.write(frame)
     
-    # Optional: Display frame
+    # Optionally display the frame
     cv2.imshow("Head Pose Estimation", frame)
     if cv2.waitKey(1) & 0xFF == 27:
         break
@@ -245,4 +222,4 @@ out.release()
 cv2.destroyAllWindows()
 face_mesh.close()
 
-print(f"Video processing complete.")
+print("Video processing complete.")
