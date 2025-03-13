@@ -1,0 +1,113 @@
+% Configure radar code for two sensors
+clc;
+clear;
+
+% Define COM ports for the two sensors
+COMPORT_1 = 'COM4';  % Sensor 1
+COMPORT_2 = 'COM6';  % Sensor 2
+
+% Load the ModuleConnector library
+Lib = ModuleConnector.Library;
+
+try
+    % Initialize connections for both sensors
+    disp('Initializing Sensor 1...');
+    mc1 = ModuleConnector.ModuleConnector(COMPORT_1, 0);
+    xep1 = mc1.get_xep();
+
+    disp('Initializing Sensor 2...');
+    mc2 = ModuleConnector.ModuleConnector(COMPORT_2, 0);
+    xep2 = mc2.get_xep();
+catch ME
+    disp('Error initializing sensors:');
+    disp(ME.message);
+    return;
+end
+
+% Radar configuration parameters
+fps = 500;  % Frames per second
+frame_area_start = 0;  % Start range in meters
+frame_area_stop = 3;   % Stop range in meters
+dac_min = 949;
+dac_max = 1100;
+iterations = 16;
+pulses_per_step = 5;
+
+% Configure Sensor 1
+disp('Configuring Sensor 1...');
+xep1.x4driver_init();
+xep1.x4driver_set_downconversion(1);
+xep1.x4driver_set_iterations(iterations);
+xep1.x4driver_set_pulsesperstep(pulses_per_step);
+xep1.x4driver_set_dac_min(dac_min);
+xep1.x4driver_set_dac_max(dac_max);
+xep1.x4driver_set_frame_area_offset(0.18);
+xep1.x4driver_set_frame_area(frame_area_start, frame_area_stop);
+xep1.x4driver_set_fps(fps);
+
+% Configure Sensor 2
+disp('Configuring Sensor 2...');
+xep2.x4driver_init();
+xep2.x4driver_set_downconversion(1);
+xep2.x4driver_set_iterations(iterations);
+xep2.x4driver_set_pulsesperstep(pulses_per_step);
+xep2.x4driver_set_dac_min(dac_min);
+xep2.x4driver_set_dac_max(dac_max);
+xep2.x4driver_set_frame_area_offset(0.18);
+xep2.x4driver_set_frame_area(frame_area_start, frame_area_stop);
+xep2.x4driver_set_fps(fps);
+
+% Visualization setup
+figure;
+subplot(2, 1, 1);
+ph1 = plot(NaN, NaN);
+title('Sensor 1');
+xlabel('Range (m)');
+ylabel('Amplitude');
+grid on;
+
+subplot(2, 1, 2);
+ph2 = plot(NaN, NaN);
+title('Sensor 2');
+xlabel('Range (m)');
+ylabel('Amplitude');
+grid on;
+
+% Data acquisition and visualization
+disp('Starting data streaming...');
+while ishandle(ph1)
+    % Read data from Sensor 1
+    if xep1.peek_message_data_float > 0
+        [~, len1, ~, data1] = xep1.read_message_data_float();
+        if len1 > 0
+            i_vec1 = data1(1:len1/2);
+            q_vec1 = data1(len1/2 + 1:end);
+            iq_vec1 = i_vec1 + 1i * q_vec1;
+            ph1.YData = abs(iq_vec1);
+            ph1.XData = linspace(frame_area_start, frame_area_stop, length(iq_vec1));
+        end
+    end
+
+    % Read data from Sensor 2
+    if xep2.peek_message_data_float > 0
+        [~, len2, ~, data2] = xep2.read_message_data_float();
+        if len2 > 0
+            i_vec2 = data2(1:len2/2);
+            q_vec2 = data2(len2/2 + 1:end);
+            iq_vec2 = i_vec2 + 1i * q_vec2;
+            ph2.YData = abs(iq_vec2);
+            ph2.XData = linspace(frame_area_start, frame_area_stop, length(iq_vec2));
+        end
+    end
+
+    drawnow;
+end
+
+% Stop streaming
+xep1.x4driver_set_fps(0);
+xep2.x4driver_set_fps(0);
+
+% Cleanup
+clear mc1 mc2 xep1 xep2;
+Lib.unloadlib();
+disp('Sensors disconnected.');

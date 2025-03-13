@@ -1,0 +1,201 @@
+% XeThru Radar Data Streaming Script for Three Sensors with Synchronized Video Recording
+
+% Add ModuleConnector path
+add_ModuleConnector_path();
+clc;
+clear;
+
+%% User Configurations:
+inputs = {'COM6','COM5','COM4'}; % COM ports for the three sensors
+data_type = ModuleConnector.DataRecorderInterface.DataType_FloatDataType;
+downconversion = 1; % 0: RF data output, 1: baseband IQ data output
+rec = 1; % Enable recording
+fps = 60; % Frames per second
+K = 56; % STFT window size (number of Doppler frequency bins)
+start_run_num = 0;
+maxdb = -5;
+mindb = -35;
+mindbF = -35;
+output_dir = 'recordings'; % Directory to save radar recordings
+output_dir_vid = 'video_recordings'; % Directory to save videos
+record_duration = 2; % Recording duration in seconds
+pause_duration = 2; % Pause between recordings in seconds
+
+% Create directories if they do not exist
+if ~exist(output_dir, 'dir')
+    mkdir(output_dir);
+end
+if ~exist(output_dir_vid, 'dir')
+    mkdir(output_dir_vid);
+end
+
+% Initialize ZED Camera
+zed = webcam('ZED 2');
+zed.Resolution = zed.AvailableResolutions{1};
+[height, width, ~] = size(snapshot(zed));
+snapshot(zed); % Warm-up capture
+
+% Radar parameters
+dac_min = 949;
+dac_max = 1100;
+iterations = 16;
+tx_center_frequency = 3;
+tx_power = 2;
+pulses_per_step = 5;
+frame_area_offset = 0.18;
+frame_area_start = 0;
+frame_area_stop = 3;
+
+% File labels for different head positions
+file_labels = {'up', 'down', 'left30', 'left60', 'left90', 'right30', 'right60', 'right90', 'nomovement'};
+num_labels = length(file_labels);
+
+% Ping sound configuration
+fs = 44100;
+duration = 0.2;
+freq_start = 500;
+freq_stop = 1000;
+t = linspace(0, duration, fs * duration);
+ping_sound = sin(2 * pi * linspace(freq_start, freq_stop, length(t)) .* t);
+ping_sound1 = sin(2 * pi * 0.6 * linspace(freq_start, freq_stop, length(t)) .* t);
+
+% Initialize counters for each label
+label_counters = zeros(1, num_labels);
+
+%% Initialize Radar Modules
+Lib = ModuleConnector.Library;
+
+try
+    % Initialize three sensors
+    disp('Initializing Sensors...');
+    mc1 = ModuleConnector.ModuleConnector(inputs{1}, 0);
+    xep1 = mc1.get_xep();
+    
+    mc2 = ModuleConnector.ModuleConnector(inputs{2}, 0);
+    xep2 = mc2.get_xep();
+    
+    mc3 = ModuleConnector.ModuleConnector(inputs{3}, 0);
+    xep3 = mc3.get_xep();
+
+    % Clear existing data queues
+    sensors = {xep1, xep2, xep3};
+    for i = 1:3
+        while sensors{i}.peek_message_data_float > 0
+            sensors{i}.read_message_data_float();
+        end
+    end
+
+    % Configure sensors
+    for i = 1:3
+        xep = sensors{i};
+        xep.x4driver_init();
+        xep.x4driver_set_downconversion(downconversion);
+        xep.x4driver_set_tx_center_frequency(tx_center_frequency);
+        xep.x4driver_set_tx_power(tx_power);
+        xep.x4driver_set_iterations(iterations);
+        xep.x4driver_set_pulsesperstep(pulses_per_step);
+        xep.x4driver_set_dac_min(dac_min);
+        xep.x4driver_set_dac_max(dac_max);
+        xep.x4driver_set_frame_area_offset(frame_area_offset);
+        xep.x4driver_set_frame_area(frame_area_start, frame_area_stop);
+    end
+
+    % Start streaming
+    xep1.x4driver_set_fps(fps);
+    xep2.x4driver_set_fps(fps);
+    xep3.x4driver_set_fps(fps);
+
+    %% Start Recording Loop
+    loop_count = 0;
+
+    while rec && loop_count < num_labels
+        loop_count = loop_count + 1;
+        label_idx = mod(loop_count - 1, num_labels) + 1;
+        file_label = file_labels{label_idx};
+        label_counters(label_idx) = label_counters(label_idx) + 1;
+        label_count = label_counters(label_idx) + start_run_num;
+
+        disp(['Starting recording cycle ', num2str(loop_count), ' (', file_label, ')']);
+
+        % Play ping sound for start
+        sound(ping_sound, fs);
+
+        % Video recording - Start slightly earlier
+        vid_filename = fullfile(output_dir_vid, sprintf('c1p%dr%d.mp4', label_idx, label_count));
+        vid = VideoWriter(vid_filename, 'MPEG-4');
+        vid.FrameRate = fps;
+        open(vid);
+
+        % Start radar recording
+        recorder1 = mc1.get_data_recorder();
+        session_id1 = sprintf('s1p%dr%d', label_idx, label_count);
+        recorder1.set_session_id(session_id1);
+        recorder1.start_recording(data_type, output_dir);
+
+        recorder2 = mc2.get_data_recorder();
+        session_id2 = sprintf('s2p%dr%d', label_idx, label_count);
+        recorder2.set_session_id(session_id2);
+        recorder2.start_recording(data_type, output_dir);
+
+        recorder3 = mc3.get_data_recorder();
+        session_id3 = sprintf('s3p%dr%d', label_idx, label_count);
+        recorder3.set_session_id(session_id3);
+        recorder3.start_recording(data_type, output_dir);
+
+        start_time = tic;
+        frame_buffer = [];
+
+        % Capture video frames synchronously with radar data
+        while toc(start_time) < record_duration
+            img = snapshot(zed);
+            image_left = img(:, 1:width/2, :);
+
+            % Buffer frames to avoid lag
+            frame_buffer = cat(4, frame_buffer, image_left);
+
+            % Write frame every ~1/FPS seconds
+            if mod(size(frame_buffer, 4), fps) == 0
+                writeVideo(vid, image_left);
+            end
+
+            drawnow;
+        end
+
+        % Write all buffered frames to video
+        for i = 1:size(frame_buffer, 4)
+            writeVideo(vid, frame_buffer(:, :, :, i));
+        end
+
+        close(vid);
+
+        % Stop radar recording
+        recorder1.stop_recording(data_type);
+        recorder2.stop_recording(data_type);
+        recorder3.stop_recording(data_type);
+        disp(['Stopped recording for cycle ', num2str(loop_count), ' (', file_label, ')']);
+
+        % Play ping sound for stop
+        sound(ping_sound1, fs);
+
+        % Pause between recordings
+        disp(['Pausing for ', num2str(pause_duration), ' seconds...']);
+        pause(pause_duration);
+    end
+
+    % Stop data streaming
+    xep1.x4driver_set_fps(0);
+    xep2.x4driver_set_fps(0);
+    xep3.x4driver_set_fps(0);
+    disp('Stopped data streaming.');
+
+catch ME
+    disp('Error occurred:');
+    disp(ME.message);
+end
+
+% Cleanup
+clear mc1 mc2 mc3 xep1 xep2 xep3 recorder1 recorder2 recorder3 zed;
+if exist('Lib', 'var') && isvalid(Lib)
+    Lib.unloadlib;
+end
+disp('Cleanup complete.');
