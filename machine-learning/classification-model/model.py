@@ -170,9 +170,9 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
     run = wandb.init(
         project="radar-head-movement",
         group="optuna-study",
-        name=f"trial-{trial.number}",
+        name=f"trial-{trial.number + 1}", 
         config={
-            "trial_id": trial.number,
+            "trial_id": trial.number + 1,
             "study_name": "head-movement-classification"
         }
     )
@@ -193,7 +193,7 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
             'use_pretrained': use_pretrained,
             'num_unfrozen_layers': num_unfrozen_layers,
             'lr': trial.suggest_float('lr', 1e-6, 1e-3, log=True),
-            'batch_size': trial.suggest_categorical('batch_size', [4, 8, 16]),
+            'batch_size': trial.suggest_categorical('batch_size', [16, 32]),
             'num_layers': trial.suggest_int('num_layers', 1, 3),
             'use_dropout': trial.suggest_categorical('use_dropout', [True, False]),
             'use_batchnorm': trial.suggest_categorical('use_batchnorm', [True, False]),
@@ -201,10 +201,7 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
             'min_delta': trial.suggest_float('min_delta', 1e-5, 0.01, log=True),
             'optimizer': trial.suggest_categorical('optimizer', ['adam', 'sgd']),
             'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True),
-            'use_augmentation': trial.suggest_categorical('use_augmentation', [True, False]),
         }
-        if params['use_augmentation']:
-            params['noise_std'] = trial.suggest_float('noise_std', 0.0, 0.3)
         if params['optimizer'] == 'sgd':
             params['momentum'] = trial.suggest_float('momentum', 0.8, 0.99)
         params['hidden_dims'] = [trial.suggest_categorical(f'layer_{i}_dim', [64, 128, 256, 512]) for i in range(params['num_layers'])]
@@ -212,8 +209,16 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
 
         wandb.config.update(params)
 
-        train_loader = DataLoader(train_dataset, batch_size=params['batch_size'], shuffle=True, pin_memory=(device.type == 'cuda'))
-        val_loader = DataLoader(val_dataset, batch_size=params['batch_size'], pin_memory=(device.type == 'cuda'))
+        train_loader = DataLoader(train_dataset, 
+                                  batch_size=params['batch_size'], 
+                                  shuffle=True, 
+                                  pin_memory=(device.type == 'cuda'), 
+                                  drop_last=True)
+        
+        val_loader = DataLoader(val_dataset, 
+                                batch_size=params['batch_size'], 
+                                pin_memory=(device.type == 'cuda'), 
+                                drop_last=True)
 
         model_params = {
             'model_type': params['model_type'],
@@ -248,8 +253,7 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
             train_loss = 0
             for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
-                if params['use_augmentation']:
-                    inputs = inputs + torch.randn_like(inputs) * params['noise_std']
+                # Data augmentation removed
                 optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
@@ -316,10 +320,8 @@ def bayesian_optimisation(train, val, device, class_weights, num_classes):
     )
     study.optimize(
         lambda trial: objective(trial, train, val, device, class_weights, num_classes),
-        n_trials=150
+        n_trials=50
     )
-
-    wandb.init(project="radar-head-movement", name="final-model")
 
     print("\nBest trial:")
     trial = study.best_trial
