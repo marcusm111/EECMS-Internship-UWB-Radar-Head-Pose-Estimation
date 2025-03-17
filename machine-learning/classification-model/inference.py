@@ -83,32 +83,79 @@ def load_model(
         "Left90", "Left30", "Left60", "Up"
     ]
     
-    # Use default stats for normalization
-    normalization_stats = {
-        'mean': 0.0,
-        'std': 1.0
-    }
-    
-    # Get class names and normalization stats if possible
-    training_dir = os.path.join(config["data"], "training_data")
-    tensor_path = os.path.join(training_dir, "tensor_data")
-    
-    # Try to get class names and stats from dataset
-    try:
-        if os.path.exists(tensor_path):
-            dataset = TimeFrequencyMapDataset(tensor_path, compute_stats=True)
-            class_names = dataset.classes
-            if hasattr(dataset, 'mean') and hasattr(dataset, 'std'):
-                normalization_stats['mean'] = dataset.mean.item()
-                normalization_stats['std'] = dataset.std.item()
-        else:
-            logger.warning(f"Tensor path not found: {tensor_path}")
-            logger.warning(f"Using default class names: {default_class_names}")
+    # PRIORITY 1: Use class names from config file (added during training)
+    if "class_names" in config:
+        logger.info("Using class names from config file")
+        class_names = config["class_names"]
+        logger.info(f"Loaded {len(class_names)} classes: {class_names}")
+    else:
+        # PRIORITY 2: Try to get class names from dataset
+        logger.warning("Class names not found in config, attempting to compute from dataset")
+        
+        # Get class names and normalization stats if possible
+        training_dir = os.path.join(config["data"], "training_data")
+        tensor_path = os.path.join(training_dir, "tensor_data")
+        
+        # Try to get class names from dataset
+        try:
+            if os.path.exists(tensor_path):
+                dataset = TimeFrequencyMapDataset(tensor_path, compute_stats=False)
+                class_names = dataset.classes
+                logger.info(f"Loaded {len(class_names)} classes from dataset: {class_names}")
+            else:
+                logger.warning(f"Tensor path not found: {tensor_path}")
+                logger.warning(f"Using default class names")
+                class_names = default_class_names
+        except Exception as e:
+            logger.warning(f"Error accessing dataset: {str(e)}")
+            logger.warning(f"Using default class names")
             class_names = default_class_names
-    except Exception as e:
-        logger.warning(f"Error accessing dataset: {str(e)}")
-        logger.warning(f"Using default class names: {default_class_names}")
-        class_names = default_class_names
+    
+    # First priority: Use normalization stats from config file (added during training)
+    if "normalization_stats" in config and "mean" in config["normalization_stats"] and "std" in config["normalization_stats"]:
+        logger.info("Using normalization statistics from config file")
+        normalization_stats = {
+            'mean': config["normalization_stats"]["mean"],
+            'std': config["normalization_stats"]["std"]
+        }
+        logger.info(f"Loaded normalization stats: mean={normalization_stats['mean']:.4f}, std={normalization_stats['std']:.4f}")
+    else:
+        # Second priority: Try to compute from dataset
+        logger.warning("Normalization statistics not found in config, attempting to compute from dataset")
+        normalization_stats = {
+            'mean': 0.0,
+            'std': 1.0
+        }
+        
+        # Try to get normalization stats from dataset
+        try:
+            if os.path.exists(tensor_path):
+                # If we haven't created a dataset yet, do it now
+                if not locals().get('dataset'):
+                    dataset = TimeFrequencyMapDataset(tensor_path, compute_stats=True)
+                    # If we didn't get class names earlier, get them now
+                    if 'class_names' not in locals() or class_names == default_class_names:
+                        class_names = dataset.classes
+                        
+                if hasattr(dataset, 'mean') and hasattr(dataset, 'std'):
+                    normalization_stats['mean'] = dataset.mean.item()
+                    normalization_stats['std'] = dataset.std.item()
+                    logger.info(f"Computed normalization stats: mean={normalization_stats['mean']:.4f}, std={normalization_stats['std']:.4f}")
+                else:
+                    logger.warning("Dataset does not have mean and std attributes, using defaults")
+            else:
+                logger.warning(f"Tensor path not found: {tensor_path}")
+                logger.warning(f"Using default normalization values")
+        except Exception as e:
+            logger.warning(f"Error accessing dataset for stats: {str(e)}")
+            logger.warning(f"Using default normalization values")
+            
+        logger.warning(f"Using normalization stats: mean={normalization_stats['mean']:.4f}, std={normalization_stats['std']:.4f}")
+        logger.warning("Note: These may not match the values used during training!")
+    
+    # Check for unusual normalization values
+    if abs(normalization_stats['mean']) > 10 or normalization_stats['std'] < 0.01:
+        logger.warning(f"Unusual normalization values detected: mean={normalization_stats['mean']:.4f}, std={normalization_stats['std']:.4f}")
     
     return model, device, class_names, normalization_stats
 

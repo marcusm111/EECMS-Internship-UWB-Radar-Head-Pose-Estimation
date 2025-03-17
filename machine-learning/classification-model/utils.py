@@ -126,7 +126,7 @@ def calculate_stats(subset: Subset) -> Tuple[torch.Tensor, torch.Tensor]:
 def create_normalised_subsets(
     raw_dataset: Dataset, 
     device: torch.device
-) -> Tuple[NormalizedDataset, NormalizedDataset, NormalizedDataset, torch.Tensor]:
+) -> Tuple[NormalizedDataset, NormalizedDataset, NormalizedDataset, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Create normalized train, validation, and test subsets with stratified sampling.
     
@@ -139,42 +139,11 @@ def create_normalised_subsets(
         val: Normalized validation dataset
         test: Normalized test dataset
         class_weights: Tensor of class weights for handling class imbalance
+        train_mean: Mean value used for normalization
+        train_std: Standard deviation used for normalization
     """
-    # Get targets (labels) for all samples
-    targets = [raw_dataset[i][1].item() for i in range(len(raw_dataset))]
-    logger.info(f"Dataset class order: {raw_dataset.classes}")
-    logger.info(f"Total dataset size: {len(raw_dataset)} samples")
-
-    # First split: Train+Val vs Test (80% / 20%)
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_val_indices, test_indices = next(sss.split(np.zeros(len(raw_dataset)), targets))
+    # ... existing code ...
     
-    # Second split: Train vs Val (80% / 20% of train_val)
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_rel_indices, val_rel_indices = next(sss.split(
-        np.zeros(len(train_val_indices)), 
-        [targets[i] for i in train_val_indices]
-    ))
-    
-    # Map relative indices to original dataset indices
-    train_abs_indices = train_val_indices[train_rel_indices]
-    val_abs_indices = train_val_indices[val_rel_indices]
-
-    # Create subsets
-    train_subset = Subset(raw_dataset, train_abs_indices)
-    val_subset = Subset(raw_dataset, val_abs_indices)
-    test_subset = Subset(raw_dataset, test_indices)
-    
-    logger.info(f"Split sizes - Train: {len(train_subset)}, Val: {len(val_subset)}, Test: {len(test_subset)}")
-
-    # Calculate class weights for handling imbalanced data
-    train_labels = [train_subset[i][1].item() for i in range(len(train_subset))] 
-    class_counts = torch.bincount(torch.tensor(train_labels), minlength=len(raw_dataset.classes)) + 1
-    class_weights = (1.0 / class_counts.float())
-    class_weights = (class_weights / class_weights.sum()).to(device)
-    
-    logger.info(f"Class weights: {class_weights}")
-
     # Calculate normalization statistics from training data only
     train_mean, train_std = calculate_stats(train_subset)
     logger.info(f"Normalization stats - Mean: {train_mean.item():.4f}, Std: {train_std.item():.4f}")
@@ -183,7 +152,7 @@ def create_normalised_subsets(
     train = NormalizedDataset(train_subset, train_mean, train_std)
     val = NormalizedDataset(val_subset, train_mean, train_std)
     test = NormalizedDataset(test_subset, train_mean, train_std)
-
+    
     # Log class distribution
     class_to_idx = {name: i for i, name in enumerate(raw_dataset.classes)}
     

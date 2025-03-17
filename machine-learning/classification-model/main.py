@@ -464,25 +464,12 @@ def save_model_and_config(
     avg_test_loss: float,
     all_preds: List[int],
     all_labels: List[int],
-    class_names: List[str]
+    class_names: List[str],
+    train_mean: float,
+    train_std: float
 ) -> Tuple[str, str]:
     """
     Save the trained model and configuration.
-    
-    Args:
-        model: Trained PyTorch model
-        config: Original configuration
-        model_params: Model architecture parameters
-        params: Training parameters
-        test_acc: Test accuracy
-        avg_test_loss: Average test loss
-        all_preds: List of all predictions
-        all_labels: List of all true labels
-        class_names: List of class names
-        
-    Returns:
-        final_model_path: Path to saved model
-        final_config_path: Path to saved configuration
     """
     # Paths for saving
     final_model_path = "final_head_movement_model.pth"
@@ -512,7 +499,14 @@ def save_model_and_config(
             "weight_decay": params['weight_decay'],
             "optimizer": params['optimizer'],
             "patience": params['patience']
-        }
+        },
+        # Add normalization statistics to config
+        "normalization_stats": {
+            "mean": float(train_mean),
+            "std": float(train_std)
+        },
+        # Add class names to config for consistent inference
+        "class_names": class_names
     }
     
     # If using SGD, include momentum parameter
@@ -522,6 +516,7 @@ def save_model_and_config(
     # Save final configuration to YAML file
     save_config(final_config, final_config_path)
     print(f"Final configuration saved to {final_config_path}")
+    logger.info(f"Class names saved to config: {class_names}")
     
     # Try to save to wandb, but catch errors
     try:
@@ -568,6 +563,10 @@ def main():
     
     # Prepare datasets
     train, val, test, class_weights, class_names = prepare_datasets(tensor_path, device)
+    
+    # Extract normalization stats from training dataset (assuming NormalizedDataset)
+    train_mean = train.mean
+    train_std = train.std
 
     # Define loss function with class weights
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))
@@ -628,7 +627,9 @@ def main():
         avg_test_loss=avg_test_loss,
         all_preds=all_preds,
         all_labels=all_labels,
-        class_names=class_names
+        class_names=class_names,
+        train_mean=train_mean.item(), 
+        train_std=train_std.item()   
     )
     
     print(f"Training complete. Model saved to {final_model_path}")
