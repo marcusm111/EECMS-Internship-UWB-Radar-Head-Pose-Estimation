@@ -1,9 +1,9 @@
 """
-Continuous Inference Module for Head Movement Classification
+Continuous Inference Module for Head Movement Classification with Visual Display
 
 This module provides functionality for continuously monitoring a directory for new sensor data files,
 processing them as they arrive, and running inference using the trained head movement classification model.
-It's designed to work alongside a MATLAB script that generates the sensor data files in real-time.
+It displays results in a large, sophisticated GUI popup.
 
 Example usage:
     model, device, classes, stats = load_model()
@@ -25,8 +25,15 @@ import shutil
 import logging
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Set
+import sys
+import threading
 
 import torch
+import numpy as np
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, 
+                             QWidget, QProgressBar, QFrame, QSizePolicy, QDesktopWidget)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QObject
+from PyQt5.QtGui import QFont, QPalette, QColor, QLinearGradient, QGradient, QPainter, QPen, QBrush
 
 # Import from your existing modules
 from inference import load_model, load_spectrogram, run_inference
@@ -42,6 +49,309 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class InferenceSignals(QObject):
+    """Signal class for thread-safe communication with GUI"""
+    inference_result = pyqtSignal(str, float, dict)
+    processing_started = pyqtSignal()
+    processing_completed = pyqtSignal()
+
+class HeadMovementDisplay(QMainWindow):
+    """
+    GUI window to display head movement detection results in real-time.
+    """
+    
+    def __init__(self, class_names):
+        super().__init__()
+        self.class_names = class_names
+        self.initUI()
+        
+    def initUI(self):
+        """Initialize the UI components"""
+        # Configure window
+        self.setWindowTitle("Head Movement Detection")
+        self.setStyleSheet("background-color: #2E3440;")  # Dark background
+        
+        # Set default window size instead of percentage of screen
+        default_width, default_height = 1000, 800
+        self.resize(default_width, default_height)
+        self.setMinimumSize(800, 600)  # Smaller minimum size to allow more flexibility
+        
+        # Center the window
+        self.center()
+        
+        # Create central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+        
+        # Add title
+        title_label = QLabel("Head Movement Detection")
+        title_label.setFont(QFont("Arial", 22, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("color: #ECEFF4; margin-bottom: 10px;")
+        title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        title_label.setMinimumHeight(50)  # Increased minimum height
+        main_layout.addWidget(title_label)
+        
+        # Add status indicator
+        self.status_label = QLabel("Waiting for movement data...")
+        self.status_label.setFont(QFont("Arial", 14))
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("color: #D8DEE9; margin-bottom: 15px;")
+        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.status_label.setMinimumHeight(40)  # Increased minimum height
+        self.status_label.setWordWrap(True)  # Enable word wrapping
+        main_layout.addWidget(self.status_label)
+        
+        # Create detection result frame
+        detection_frame = QFrame()
+        detection_frame.setFrameShape(QFrame.StyledPanel)
+        detection_frame.setStyleSheet("""
+            QFrame {
+                background-color: #3B4252;
+                border-radius: 10px;
+                padding: 15px;
+            }
+        """)
+        detection_layout = QVBoxLayout(detection_frame)
+        detection_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Movement type display
+        self.movement_label = QLabel("No Movement Detected")
+        self.movement_label.setFont(QFont("Arial", 28, QFont.Bold))  # Reduced default font size
+        self.movement_label.setAlignment(Qt.AlignCenter)
+        self.movement_label.setStyleSheet("color: #88C0D0; margin: 10px;")
+        self.movement_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.movement_label.setMinimumHeight(100)  # Significantly increased minimum height
+        self.movement_label.setWordWrap(True)  # Enable word wrapping
+        detection_layout.addWidget(self.movement_label)
+        
+        # Confidence display
+        self.confidence_label = QLabel("Confidence: --")
+        self.confidence_label.setFont(QFont("Arial", 18))
+        self.confidence_label.setAlignment(Qt.AlignCenter)
+        self.confidence_label.setStyleSheet("color: #A3BE8C; margin-bottom: 10px;")
+        self.confidence_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.confidence_label.setMinimumHeight(50)  # Increased minimum height
+        detection_layout.addWidget(self.confidence_label)
+        
+        # Add detection frame to main layout
+        main_layout.addWidget(detection_frame, 2)  # Give it more space with stretch factor
+        
+        # Create probability bars container
+        prob_container = QFrame()
+        prob_container.setFrameShape(QFrame.StyledPanel)
+        prob_container.setStyleSheet("""
+            QFrame {
+                background-color: #3B4252;
+                border-radius: 10px;
+                padding: 15px;
+            }
+        """)
+        prob_layout = QVBoxLayout(prob_container)
+        prob_layout.setSpacing(10)
+        prob_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Probability title
+        prob_title = QLabel("Probability Distribution")
+        prob_title.setFont(QFont("Arial", 16, QFont.Bold))
+        prob_title.setAlignment(Qt.AlignCenter)
+        prob_title.setStyleSheet("color: #ECEFF4; margin-bottom: 10px;")
+        prob_title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        prob_title.setMinimumHeight(40)  # Increased minimum height
+        prob_layout.addWidget(prob_title)
+        
+        # Container widget for probability bars
+        bars_container = QWidget()
+        bars_layout = QVBoxLayout(bars_container)
+        bars_layout.setSpacing(8)  # Reduced spacing slightly for more compact layout
+        
+        # Create progress bars for each class
+        self.prob_bars = {}
+        for class_name in self.class_names:
+            # Create frame for each bar
+            bar_frame = QFrame()
+            bar_frame.setFrameShape(QFrame.NoFrame)
+            bar_frame.setMinimumHeight(40)  # Increased minimum height for better visibility
+            bar_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+            
+            class_layout = QHBoxLayout(bar_frame)
+            class_layout.setContentsMargins(5, 0, 5, 0)
+            class_layout.setSpacing(10)
+            
+            # Simple fixed-width label for class name - wide enough for any class name
+            name_label = QLabel(class_name)
+            name_label.setFixedWidth(150)  # Fixed width that should fit all class names
+            name_label.setFont(QFont("Arial", 12))
+            name_label.setStyleSheet("color: #D8DEE9;")
+            name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            class_layout.addWidget(name_label)
+            class_layout.addWidget(name_label)
+            
+            # Progress bar for probability
+            bar = QProgressBar()
+            bar.setMinimum(0)
+            bar.setMaximum(100)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setMinimumHeight(25)  # Slightly reduced height
+            bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            bar.setStyleSheet("""
+                QProgressBar {
+                    border: 2px solid #434C5E;
+                    border-radius: 5px;
+                    background-color: #2E3440;
+                }
+                QProgressBar::chunk {
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #5E81AC, stop:1 #88C0D0);
+                    border-radius: 3px;
+                }
+            """)
+            class_layout.addWidget(bar)
+            
+            # Value label
+            value_label = QLabel("0.00%")
+            value_label.setMinimumWidth(80)
+            value_label.setFixedWidth(80)  # Slightly reduced width
+            value_label.setFont(QFont("Arial", 12))
+            value_label.setStyleSheet("color: #D8DEE9;")
+            value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            value_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+            class_layout.addWidget(value_label)
+            
+            # Add to layout and store references
+            bars_layout.addWidget(bar_frame)
+            self.prob_bars[class_name] = (bar, value_label)
+        
+        # Add the bars container to the probability layout
+        prob_layout.addWidget(bars_container)
+        
+        # Add probability container to main layout
+        main_layout.addWidget(prob_container, 3)  # Give probability section more space
+        
+        # Processing indicator
+        processing_layout = QHBoxLayout()
+        self.processing_label = QLabel("Processing Status: Idle")
+        self.processing_label.setFont(QFont("Arial", 12))
+        self.processing_label.setStyleSheet("color: #ECEFF4;")
+        self.processing_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.processing_label.setMinimumHeight(30)  # Increased minimum height
+        processing_layout.addWidget(self.processing_label)
+        main_layout.addLayout(processing_layout)
+        
+        # Create signals object
+        self.signals = InferenceSignals()
+        self.signals.inference_result.connect(self.update_display)
+        self.signals.processing_started.connect(self.on_processing_started)
+        self.signals.processing_completed.connect(self.on_processing_completed)
+        
+    def center(self):
+        """Center the window on the screen"""
+        frame_geometry = self.frameGeometry()
+        screen_center = QDesktopWidget().availableGeometry().center()
+        frame_geometry.moveCenter(screen_center)
+        self.move(frame_geometry.topLeft())
+    
+    @pyqtSlot(str, float, dict)
+    def update_display(self, prediction: str, confidence: float, probabilities: Dict[str, float]):
+        """Update the display with new inference results"""
+        # Update movement label with appropriate font size for visibility
+        font_size = 28  # Default font size
+        if len(prediction) > 12:
+            font_size = 24
+        if len(prediction) > 18:
+            font_size = 20
+            
+        self.movement_label.setFont(QFont("Arial", font_size, QFont.Bold))
+        self.movement_label.setText(prediction)
+        
+        # Update confidence
+        conf_percentage = confidence * 100
+        conf_color = "#A3BE8C" if conf_percentage > 70 else "#EBCB8B" if conf_percentage > 40 else "#BF616A"
+        self.confidence_label.setText(f"Confidence: {conf_percentage:.2f}%")
+        self.confidence_label.setStyleSheet(f"color: {conf_color}; margin-bottom: 10px;")
+        
+        # Update all probability bars
+        for class_name, (bar, value_label) in self.prob_bars.items():
+            prob_value = probabilities.get(class_name, 0) * 100
+            bar.setValue(int(prob_value))
+            
+            # Format percentage with fixed precision
+            value_text = f"{prob_value:.2f}%"
+            value_label.setText(value_text)
+            
+            # Highlight the detected class
+            if class_name == prediction:
+                bar.setStyleSheet("""
+                    QProgressBar {
+                        border: 2px solid #434C5E;
+                        border-radius: 5px;
+                        background-color: #2E3440;
+                    }
+                    QProgressBar::chunk {
+                        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #A3BE8C, stop:1 #8FBCBB);
+                        border-radius: 3px;
+                    }
+                """)
+                value_label.setStyleSheet("color: #A3BE8C; font-weight: bold;")
+            else:
+                bar.setStyleSheet("""
+                    QProgressBar {
+                        border: 2px solid #434C5E;
+                        border-radius: 5px;
+                        background-color: #2E3440;
+                    }
+                    QProgressBar::chunk {
+                        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #5E81AC, stop:1 #88C0D0);
+                        border-radius: 3px;
+                    }
+                """)
+                value_label.setStyleSheet("color: #D8DEE9;")
+        
+        # Update status - add timestamp for better feedback
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.status_label.setText(f"Movement Detected: {prediction} [{timestamp}]")
+    
+    @pyqtSlot()
+    def on_processing_started(self):
+        """Called when processing of data begins"""
+        self.processing_label.setText("Processing Status: Active")
+        self.processing_label.setStyleSheet("color: #A3BE8C;")
+    
+    @pyqtSlot()
+    def on_processing_completed(self):
+        """Called when processing of data completes"""
+        self.processing_label.setText("Processing Status: Idle")
+        self.processing_label.setStyleSheet("color: #ECEFF4;")
+    
+    # Override the resize event to ensure font sizes are updated
+    def resizeEvent(self, event):
+        """Handle window resize events to adjust font sizes if needed"""
+        # Let the parent class handle the basic resize behavior
+        super().resizeEvent(event)
+        
+        # Get the current window size
+        width = self.width()
+        height = self.height()
+        
+        # Adjust font sizes based on window dimensions
+        if width < 900:  # Small window
+            self.movement_label.setFont(QFont("Arial", 20, QFont.Bold))
+            self.confidence_label.setFont(QFont("Arial", 14))
+        else:  # Larger window - use default sizes with text length adjustment
+            # Adjust movement label based on content length
+            text = self.movement_label.text()
+            if len(text) > 12:
+                self.movement_label.setFont(QFont("Arial", 24, QFont.Bold))
+            elif len(text) > 18:
+                self.movement_label.setFont(QFont("Arial", 20, QFont.Bold))
+            else:
+                self.movement_label.setFont(QFont("Arial", 28, QFont.Bold))
+            
+            self.confidence_label.setFont(QFont("Arial", 18))
 
 def setup_directories(input_dir: str, archive_dir: str) -> Tuple[str, str]:
     """
@@ -219,7 +529,8 @@ def process_file_set(
     class_names: List[str],
     norm_stats: Dict[str, float],
     results_file: str,
-    archive_dir: str
+    archive_dir: str,
+    signals: Optional[InferenceSignals] = None
 ) -> bool:
     """
     Process a complete set of sensor files (front, left, right).
@@ -234,11 +545,16 @@ def process_file_set(
         norm_stats: Dictionary with mean and std values for normalization
         results_file: Path to the results CSV file
         archive_dir: Directory to move processed files to
+        signals: Optional signals object for GUI updates
         
     Returns:
         True if successful, False otherwise
     """
     try:
+        # Signal processing started if GUI is active
+        if signals:
+            signals.processing_started.emit()
+        
         # Load the spectrogram
         tensor = load_spectrogram(front_file)
         
@@ -263,12 +579,22 @@ def process_file_set(
             probabilities
         )
         
+        # Update GUI if available
+        if signals:
+            signals.inference_result.emit(prediction, confidence, probabilities)
+        
         # Archive the files
         archive_files(front_file, left_file, right_file, archive_dir)
         
+        # Signal processing completed if GUI is active
+        if signals:
+            signals.processing_completed.emit()
+            
         return True
     except Exception as e:
         logger.error(f"Error processing files: {e}")
+        if signals:
+            signals.processing_completed.emit()
         return False
 
 
@@ -280,7 +606,8 @@ def continuous_inference_loop(
     input_dir: str,
     archive_dir: str,
     results_file: str,
-    poll_interval: float = 0.5
+    poll_interval: float = 0.5,
+    signals: Optional[InferenceSignals] = None
 ) -> None:
     """
     Main loop for continuous inference.
@@ -294,6 +621,7 @@ def continuous_inference_loop(
         archive_dir: Directory to move processed files to
         results_file: Path to the results CSV file
         poll_interval: Time in seconds between directory checks
+        signals: Optional signals object for GUI updates
     """
     processed_files = set()  # Track processed front files
     
@@ -332,7 +660,8 @@ def continuous_inference_loop(
                         class_names,
                         norm_stats,
                         results_file,
-                        archive_dir
+                        archive_dir,
+                        signals
                     )
                     
                     if success:
@@ -367,7 +696,7 @@ def start_continuous_inference(
     poll_interval: float = 0.5
 ) -> None:
     """
-    Start the continuous inference system.
+    Start the continuous inference system with GUI display.
     
     Args:
         model: Trained PyTorch model (optional, will be loaded if None)
@@ -392,17 +721,29 @@ def start_continuous_inference(
         logger.info(f"Loading model from {model_path}")
         model, device, class_names, norm_stats = load_model(model_path, config_path)
     
-    # Start the inference loop
-    continuous_inference_loop(
-        model=model,
-        device=device,
-        class_names=class_names,
-        norm_stats=norm_stats,
-        input_dir=input_dir,
-        archive_dir=archive_dir,
-        results_file=results_file,
-        poll_interval=poll_interval
+    # Initialize QApplication
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    
+    # Create display window
+    display = HeadMovementDisplay(class_names)
+    display.show()
+    
+    # Run inference loop in a separate thread
+    inference_thread = threading.Thread(
+        target=continuous_inference_loop,
+        args=(
+            model, device, class_names, norm_stats,
+            input_dir, archive_dir, results_file, poll_interval,
+            display.signals
+        ),
+        daemon=True
     )
+    inference_thread.start()
+    
+    # Start the application event loop
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
