@@ -12,6 +12,10 @@ import wandb
 import platform
 from visualisations import visualize_feature_space
 
+# Configure logging
+import logging
+logger = logging.getLogger(__name__)
+
 class ClassTokenSelector(nn.Module):
     def __init__(self):
         super().__init__()
@@ -152,8 +156,6 @@ def load_modified_model(model_type, num_classes, use_pretrained=True, hidden_dim
 
     return HeadRadarModel(features, avgpool, classifier)
 
-# Remaining functions (get_class_names_from_subset, objective, bayesian_optimisation) remain unchanged
-
 def get_class_names_from_subset(dataset):
     """Traverses through NormalizedDataset -> Subset -> original dataset"""
     if hasattr(dataset, 'subset'):
@@ -164,18 +166,24 @@ def get_class_names_from_subset(dataset):
 def objective(trial, train_dataset, val_dataset, device, class_weights, num_classes):
     if platform.system() == "Windows":
         os.environ["WANDB_SYMLINK"] = "false"
+        os.environ["WANDB_ALWAYS_COPY"] = "true"
 
     class_names = get_class_names_from_subset(val_dataset)
 
-    run = wandb.init(
-        project="radar-head-movement",
-        group="optuna-study",
-        name=f"trial-{trial.number + 1}", 
-        config={
-            "trial_id": trial.number + 1,
-            "study_name": "head-movement-classification"
-        }
-    )
+    # Try to initialize wandb, but continue without it if it fails
+    try:
+        run = wandb.init(
+            project="radar-head-movement",
+            group="optuna-study",
+            name=f"trial-{trial.number + 1}", 
+            config={
+                "trial_id": trial.number + 1,
+                "study_name": "head-movement-classification"
+            }
+        )
+    except Exception as e:
+        logger.warning(f"Could not initialize wandb: {e}")
+        run = None
 
     try:
         model_type = trial.suggest_categorical('model_type', ['vgg16', 'resnet50', 'vit'])
@@ -207,7 +215,12 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
         params['hidden_dims'] = [trial.suggest_categorical(f'layer_{i}_dim', [64, 128, 256, 512]) for i in range(params['num_layers'])]
         params['dropout_rate'] = trial.suggest_float('dropout_rate', 0.1, 0.5) if params['use_dropout'] else 0.0
 
-        wandb.config.update(params)
+        # Only update wandb config if we have a valid run
+        if run is not None:
+            try:
+                wandb.config.update(params)
+            except Exception:
+                pass
 
         train_loader = DataLoader(train_dataset, 
                                   batch_size=params['batch_size'], 
@@ -253,7 +266,6 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
             train_loss = 0
             for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
-                # Data augmentation removed
                 optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
@@ -263,7 +275,13 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
                 train_loss += loss.item()
 
             avg_train_loss = train_loss / len(train_loader)
-            wandb.log({"train_loss": avg_train_loss, "epoch": epoch})
+            
+            # Only log to wandb if we have a valid run
+            if run is not None:
+                try:
+                    wandb.log({"train_loss": avg_train_loss, "epoch": epoch})
+                except Exception:
+                    pass
 
             model.eval()
             correct, total = 0, 0
@@ -279,7 +297,12 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
             val_acc = correct / total
             trial.report(val_acc, epoch)
 
-            wandb.log({"val_acc": val_acc, "epoch": epoch, "val_loss": val_loss/len(val_loader)})
+            # Only log to wandb if we have a valid run
+            if run is not None:
+                try:
+                    wandb.log({"val_acc": val_acc, "epoch": epoch, "val_loss": val_loss/len(val_loader)})
+                except Exception:
+                    pass
 
             if val_acc > best_val_acc + params['min_delta']:
                 best_val_acc = val_acc
@@ -294,18 +317,32 @@ def objective(trial, train_dataset, val_dataset, device, class_weights, num_clas
 
         if best_weights:
             model.load_state_dict(best_weights)
-            visualize_feature_space(
-                model=model,
-                dataloader=val_loader,
-                device=device,
-                class_names=class_names
-            )
+            try:
+                visualize_feature_space(
+                    model=model,
+                    dataloader=val_loader,
+                    device=device,
+                    class_names=class_names
+                )
+            except Exception as e:
+                logger.warning(f"Could not visualize feature space: {e}")
 
-        run.finish()
+        # Finish wandb run if we have a valid run
+        if run is not None:
+            try:
+                run.finish()
+            except Exception:
+                pass
+                
         return best_val_acc
     
     except Exception as e:
-        run.finish()
+        # Finish wandb run if we have a valid run
+        if run is not None:
+            try:
+                run.finish()
+            except Exception:
+                pass
         raise e
 
 def bayesian_optimisation(train, val, device, class_weights, num_classes):
@@ -314,20 +351,43 @@ def bayesian_optimisation(train, val, device, class_weights, num_classes):
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
             group=True,
-            n_startup_trials=50  
+            n_startup_trials=20  
         ),
         pruner=None
     )
-    study.optimize(
-        lambda trial: objective(trial, train, val, device, class_weights, num_classes),
-        n_trials=50
-    )
+    
+    try:
+        study.optimize(
+            lambda trial: objective(trial, train, val, device, class_weights, num_classes),
+            n_trials=50
+        )
 
-    print("\nBest trial:")
-    trial = study.best_trial
-    print(f"Validation accuracy: {trial.value:.4f}")
-    print("Parameters:")
-    for key, value in trial.params.items():
-        print(f"  {key}: {value}")
+        print("\nBest trial:")
+        trial = study.best_trial
+        print(f"Validation accuracy: {trial.value:.4f}")
+        print("Parameters:")
+        for key, value in trial.params.items():
+            print(f"  {key}: {value}")
 
-    return trial.params
+        return trial.params
+    except Exception as e:
+        logger.error(f"Error in Bayesian optimization: {e}")
+        # Return default parameters as a fallback
+        logger.warning("Using default fallback parameters due to optimization failure")
+        return {
+            'model_type': 'resnet50',
+            'use_pretrained': True,
+            'resnet_unfrozen_layers': 2,
+            'num_layers': 2,
+            'layer_0_dim': 256,
+            'layer_1_dim': 128,
+            'use_dropout': True,
+            'dropout_rate': 0.3,
+            'use_batchnorm': False,
+            'lr': 0.0001,
+            'batch_size': 32,
+            'optimizer': 'adam',
+            'weight_decay': 0.0001,
+            'patience': 20,
+            'min_delta': 0.001
+        }

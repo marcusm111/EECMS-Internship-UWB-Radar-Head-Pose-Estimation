@@ -4,6 +4,10 @@ import numpy as np
 from sklearn.metrics import silhouette_score
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 def visualize_feature_space(model, dataloader, device, class_names=None, max_samples=1000):
     """Visualizes feature embeddings with stratified sampling"""
@@ -27,14 +31,20 @@ def visualize_feature_space(model, dataloader, device, class_names=None, max_sam
     
     # Handle empty batches
     if not embeddings:
-        wandb.log({"feature_space_error": "No data to visualize"})
+        try:
+            wandb.log({"feature_space_error": "No data to visualize"})
+        except Exception as e:
+            logger.warning(f"Could not log to wandb: {e}")
         return
 
     try:
         embeddings = np.concatenate(embeddings)
         labels = np.concatenate(labels)
     except ValueError:
-        wandb.log({"feature_space_error": "Concatenation failed - check data dimensions"})
+        try:
+            wandb.log({"feature_space_error": "Concatenation failed - check data dimensions"})
+        except Exception as e:
+            logger.warning(f"Could not log to wandb: {e}")
         return
 
     # 2. Adaptive stratified sampling with safety checks
@@ -50,7 +60,10 @@ def visualize_feature_space(model, dataloader, device, class_names=None, max_sam
         else:
             embeds_subsample, labels_subsample = embeddings, labels
     except Exception as e:
-        wandb.log({"feature_space_error": f"Sampling failed: {str(e)}"})
+        try:
+            wandb.log({"feature_space_error": f"Sampling failed: {str(e)}"})
+        except Exception as we:
+            logger.warning(f"Could not log to wandb: {we}")
         return
 
     # 3. TSNE with dynamic perplexity
@@ -64,7 +77,10 @@ def visualize_feature_space(model, dataloader, device, class_names=None, max_sam
         )
         projections = tsne.fit_transform(embeds_subsample)
     except Exception as e:
-        wandb.log({"feature_space_error": f"TSNE failed: {str(e)}"})
+        try:
+            wandb.log({"feature_space_error": f"TSNE failed: {str(e)}"})
+        except Exception as we:
+            logger.warning(f"Could not log to wandb: {we}")
         return
 
     # 4. Plotting with proper class names
@@ -95,5 +111,12 @@ def visualize_feature_space(model, dataloader, device, class_names=None, max_sam
         plt.title("Feature Space (Single Class)")
 
     # Proper W&B logging
-    wandb.log({"feature_space": wandb.Image(plt)})
+    try:
+        wandb.log({"feature_space": wandb.Image(plt)})
+    except Exception as e:
+        logger.warning(f"Could not log to wandb: {e}")
+        # Save the plot locally as a fallback
+        plt.savefig('feature_space.png', bbox_inches='tight')
+        logger.info("Feature space visualization saved locally as 'feature_space.png'")
+    
     plt.close()

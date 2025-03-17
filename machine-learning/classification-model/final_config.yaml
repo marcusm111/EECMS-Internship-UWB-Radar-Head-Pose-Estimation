@@ -1,0 +1,20 @@
+bayesian_optimisation: true
+data: data
+default_params:
+  batch_size: 16
+  lr: 0.00020117092107270728
+  model_params:
+    dropout_rate: 0.4299597919835075
+    hidden_dims:
+    - 512
+    model_type: resnet50
+    num_unfrozen_layers: 2
+    use_batchnorm: false
+    use_dropout: true
+    use_pretrained: true
+  optimizer: adam
+  patience: 16
+  weight_decay: 6.433219073535796e-06
+num_classes: 9
+rebuild_tensors: true
+train_model: true

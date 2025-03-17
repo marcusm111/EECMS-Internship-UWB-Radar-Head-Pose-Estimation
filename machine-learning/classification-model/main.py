@@ -41,6 +41,70 @@ if os.name == 'nt' or platform.system() == "Windows":
     os.environ["WANDB_SYMLINK"] = "false"
     os.environ["WANDB_ALWAYS_COPY"] = "true"
 
+# Configure logging
+import logging
+logger = logging.getLogger(__name__)
+
+
+def init_wandb_safe(project_name="radar-head-movement", run_name="trial-1"):
+    """
+    Initialize wandb with error handling and fallback to offline mode.
+    
+    Args:
+        project_name: Name of the wandb project
+        run_name: Name of the wandb run
+        
+    Returns:
+        True if wandb initialized successfully, False if using dummy/offline mode
+    """
+    # First, set Windows-specific environment variables
+    if os.name == 'nt' or platform.system() == "Windows":
+        os.environ["WANDB_SYMLINK"] = "false"
+        os.environ["WANDB_ALWAYS_COPY"] = "true"
+    
+    # Define global wandb at the beginning to avoid syntax error
+    global wandb
+    
+    try:
+        # Try to initialize wandb normally
+        wandb.init(
+            project=project_name, 
+            name=run_name,
+            settings=wandb.Settings(start_method="thread")
+        )
+        logger.info("wandb initialized successfully")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not initialize wandb: {e}")
+        logger.info("Falling back to offline mode")
+        
+        # Try offline mode
+        try:
+            os.environ["WANDB_MODE"] = "offline"
+            wandb.init(
+                project=project_name, 
+                name=run_name,
+                settings=wandb.Settings(start_method="thread")
+            )
+            logger.info("wandb initialized in offline mode")
+            return True
+        except Exception as e_offline:
+            logger.warning(f"Could not initialize wandb in offline mode: {e_offline}")
+            
+            # Create a dummy wandb module that does nothing
+            class DummyWandb:
+                def log(self, *args, **kwargs): pass
+                def save(self, *args, **kwargs): pass
+                def finish(self, *args, **kwargs): pass
+                def Image(self, *args, **kwargs): return None
+                def Table(self, *args, **kwargs): return None
+                def plot(self, *args, **kwargs): return {"confusion_matrix": lambda **kw: None}
+                plot = type('', (), {"confusion_matrix": lambda **kw: None})()
+            
+            # Replace the global wandb instance
+            wandb = DummyWandb()
+            logger.info("Using dummy wandb implementation")
+            return False
 
 def setup_environment(config: Dict[str, Any]) -> Tuple[torch.device, str, str]:
     """
@@ -272,8 +336,11 @@ def train_model(
             optimizer.step()
             epoch_loss += loss.item()
         
-        # Log training loss
-        wandb.log({"final_train_loss": epoch_loss/len(train_loader)})
+        # Log training loss safely
+        try:
+            wandb.log({"final_train_loss": epoch_loss/len(train_loader)})
+        except Exception as e:
+            logger.warning(f"Could not log to wandb: {e}")
 
         # Validation phase
         model.eval()
@@ -288,11 +355,14 @@ def train_model(
         # Calculate validation accuracy
         val_acc = val_correct/val_dataset_size
 
-        # Log metrics
-        wandb.log({
-            "final_train_loss": epoch_loss/len(train_loader),
-            "val_acc": val_acc
-        })
+        # Log metrics safely
+        try:
+            wandb.log({
+                "final_train_loss": epoch_loss/len(train_loader),
+                "val_acc": val_acc
+            })
+        except Exception as e:
+            logger.warning(f"Could not log to wandb: {e}")
                 
         # Early stopping logic
         if val_acc > best_acc + 0.001:  # Improvement threshold
@@ -420,7 +490,13 @@ def save_model_and_config(
     
     # Save model weights
     torch.save(model.state_dict(), final_model_path)
-    wandb.save(final_model_path)
+    
+    # Try to save to wandb, but catch errors
+    try:
+        wandb.save(final_model_path)
+    except Exception as e:
+        logger.warning(f"Could not save model to wandb: {e}")
+        logger.info("Continuing without wandb model saving")
 
     # Create final configuration with updated parameters
     final_config = {
@@ -447,27 +523,35 @@ def save_model_and_config(
     save_config(final_config, final_config_path)
     print(f"Final configuration saved to {final_config_path}")
     
-    # Save to wandb
-    wandb.save(final_config_path)
+    # Try to save to wandb, but catch errors
+    try:
+        wandb.save(final_config_path)
+    except Exception as e:
+        logger.warning(f"Could not save config to wandb: {e}")
+        logger.info("Continuing without wandb config saving")
 
-    # Log final test metrics to wandb
-    wandb.log({
-        "final_test_accuracy": test_acc,
-        "final_test_loss": avg_test_loss,
-        "confusion_matrix": wandb.plot.confusion_matrix(
-            preds=all_preds,
-            y_true=all_labels,
-            class_names=class_names
-        ),
-        "final_model": wandb.Table(
-            columns=["Path"],
-            data=[[final_model_path]]
-        ),
-        "final_config": wandb.Table(
-            columns=["Path"],
-            data=[[final_config_path]]
-        )
-    })
+    # Log final test metrics to wandb with error handling
+    try:
+        wandb.log({
+            "final_test_accuracy": test_acc,
+            "final_test_loss": avg_test_loss,
+            "confusion_matrix": wandb.plot.confusion_matrix(
+                preds=all_preds,
+                y_true=all_labels,
+                class_names=class_names
+            ),
+            "final_model": wandb.Table(
+                columns=["Path"],
+                data=[[final_model_path]]
+            ),
+            "final_config": wandb.Table(
+                columns=["Path"],
+                data=[[final_config_path]]
+            )
+        })
+    except Exception as e:
+        logger.warning(f"Could not log final metrics to wandb: {e}")
+        logger.info("Continuing without wandb metrics logging")
     
     return final_model_path, final_config_path
 
@@ -488,12 +572,8 @@ def main():
     # Define loss function with class weights
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))
     
-    # Initialize wandb for experiment tracking
-    wandb.init(
-        project="radar-head-movement", 
-        name="training-run-1",
-        settings=wandb.Settings(start_method="thread")
-    )
+    # Initialize wandb for experiment tracking (safely)
+    init_wandb_safe(project_name="radar-head-movement", run_name="trial-1")
     
     # Get model and parameters
     model, model_params, params = get_model_and_parameters(
@@ -527,12 +607,16 @@ def main():
     )
     
     # Generate feature space visualization
-    visualize_feature_space(
-        model=model,
-        dataloader=test_loader,
-        device=device,
-        class_names=class_names 
-    )
+    try:
+        visualize_feature_space(
+            model=model,
+            dataloader=test_loader,
+            device=device,
+            class_names=class_names 
+        )
+    except Exception as e:
+        logger.warning(f"Could not visualize feature space: {e}")
+        logger.info("Continuing without feature space visualization")
     
     # Save model and configuration
     final_model_path, final_config_path = save_model_and_config(
