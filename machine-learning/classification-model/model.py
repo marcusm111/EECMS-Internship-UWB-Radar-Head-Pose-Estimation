@@ -351,7 +351,7 @@ def bayesian_optimisation(train, val, device, class_weights, num_classes):
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
             group=True,
-            n_startup_trials=20  
+            n_startup_trials=5  
         ),
         pruner=None
     )
@@ -359,7 +359,7 @@ def bayesian_optimisation(train, val, device, class_weights, num_classes):
     try:
         study.optimize(
             lambda trial: objective(trial, train, val, device, class_weights, num_classes),
-            n_trials=50
+            n_trials=15
         )
 
         print("\nBest trial:")

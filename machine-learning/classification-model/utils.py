@@ -126,7 +126,7 @@ def calculate_stats(subset: Subset) -> Tuple[torch.Tensor, torch.Tensor]:
 def create_normalised_subsets(
     raw_dataset: Dataset, 
     device: torch.device
-) -> Tuple[NormalizedDataset, NormalizedDataset, NormalizedDataset, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[NormalizedDataset, NormalizedDataset, NormalizedDataset, torch.Tensor]:
     """
     Create normalized train, validation, and test subsets with stratified sampling.
     
@@ -139,10 +139,42 @@ def create_normalised_subsets(
         val: Normalized validation dataset
         test: Normalized test dataset
         class_weights: Tensor of class weights for handling class imbalance
-        train_mean: Mean value used for normalization
-        train_std: Standard deviation used for normalization
     """
-    # ... existing code ...
+    # Get all labels for stratified splitting
+    all_labels = [raw_dataset[i][1] for i in range(len(raw_dataset))]
+    
+    # Create stratified split indices
+    # 70% training, 15% validation, 15% test
+    train_val_split = StratifiedShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
+    train_idx, temp_idx = next(train_val_split.split(np.zeros(len(all_labels)), all_labels))
+    
+    # Split the remaining 30% into validation and test
+    val_test_split = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=42)
+    val_labels = [all_labels[i] for i in temp_idx]
+    val_idx_in_temp, test_idx_in_temp = next(val_test_split.split(np.zeros(len(temp_idx)), val_labels))
+    
+    # Convert val_idx and test_idx to be relative to original dataset
+    val_idx = [temp_idx[i] for i in val_idx_in_temp]
+    test_idx = [temp_idx[i] for i in test_idx_in_temp]
+    
+    # Create subsets
+    train_subset = Subset(raw_dataset, train_idx)
+    val_subset = Subset(raw_dataset, val_idx)
+    test_subset = Subset(raw_dataset, test_idx)
+    
+    # Compute class weights for handling imbalanced classes
+    class_counts = {}
+    for label in all_labels:
+        label_item = label.item() if isinstance(label, torch.Tensor) else label
+        if label_item not in class_counts:
+            class_counts[label_item] = 0
+        class_counts[label_item] += 1
+    
+    # Compute inverse frequency class weights
+    num_samples = len(all_labels)
+    num_classes = len(class_counts)
+    weights = [num_samples / (num_classes * class_counts[c]) for c in sorted(class_counts.keys())]
+    class_weights = torch.tensor(weights, dtype=torch.float32).to(device)
     
     # Calculate normalization statistics from training data only
     train_mean, train_std = calculate_stats(train_subset)

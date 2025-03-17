@@ -1,4 +1,14 @@
-bayesian_optimisation: true
+bayesian_optimisation: false
+class_names:
+- Down
+- Left30
+- Left60
+- Left90
+- No_Movement
+- Right30
+- Right60
+- Right90
+- Up
 data: data
 default_params:
   batch_size: 16
@@ -15,6 +25,9 @@ default_params:
   optimizer: adam
   patience: 16
   weight_decay: 6.433219073535796e-06
+normalization_stats:
+  mean: -29.843887329101562
+  std: 5.430981636047363
 num_classes: 9
 rebuild_tensors: true
 train_model: true

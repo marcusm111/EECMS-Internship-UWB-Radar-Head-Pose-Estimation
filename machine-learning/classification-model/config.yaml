@@ -5,20 +5,21 @@ num_classes: 9
 
 # Toggle activities
 train_model: True
-bayesian_optimisation: True
+bayesian_optimisation: False
 
 # Default model parameters
 default_params:
-  model_params:
-    model_type: "resnet50"
-    use_pretrained: True
-    hidden_dims: [128, 64]
-    use_dropout: True
-    dropout_rate: 0.25
-    use_batchnorm: False
-    num_unfrozen_layers: 3
   batch_size: 16
-  lr: 0.0001
-  weight_decay: 0
-  optimizer: "adam"
-  patience: 20
+  lr: 0.00020117092107270728
+  model_params:
+    dropout_rate: 0.4299597919835075
+    hidden_dims:
+    - 512
+    model_type: resnet50
+    num_unfrozen_layers: 2
+    use_batchnorm: false
+    use_dropout: true
+    use_pretrained: true
+  optimizer: adam
+  patience: 16
+  weight_decay: 6.433219073535796e-06
