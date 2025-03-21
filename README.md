@@ -1,5 +1,5 @@
-# EECMS-Internship2024-WiFi-Analysis
-EECMS Internship 2024 WiFi Analysis
+# EECMS-Internship-UWB-Radar-Head-Pose-Estimation
+EECMS-Internship-UWB-Radar-Head-Pose-Estimation
 
 Novelda ModuleConnector Wrappers required to run MATLAB scripts: https://github.com/novelda/Legacy-SW
 
